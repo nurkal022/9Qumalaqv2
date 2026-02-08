@@ -17,6 +17,9 @@ logs/
 # Large parsed data (regenerate with parse_games.py)
 parsed_games/*.npz
 
+# Rust build artifacts
+engine/target/
+
 # IDE
 .vscode/
 .idea/
