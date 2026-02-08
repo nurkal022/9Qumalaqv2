@@ -392,6 +392,21 @@ def main():
         os.path.join(base_dir, 'mcts 3.txt'),
         os.path.join(base_dir, 'mcts 4.txt'),
         os.path.join(base_dir, 'temirtau.txt'),
+        os.path.join(base_dir, 'gameNew', 'accidental.txt'),
+        os.path.join(base_dir, 'gameNew', 'samsungs24.txt'),
+        os.path.join(base_dir, 'gameNew2', 'argenby.txt'),
+        os.path.join(base_dir, 'gameNew2', 'argenby (1).txt'),
+        os.path.join(base_dir, 'gameNew2', 'avataar.txt'),
+        os.path.join(base_dir, 'gameNew2', 'avataar (1).txt'),
+        os.path.join(base_dir, 'gameNew2', 'darru.txt'),
+        os.path.join(base_dir, 'gameNew2', 'korgol.txt'),
+        os.path.join(base_dir, 'gameNew2', 'mugalim.txt'),
+        os.path.join(base_dir, 'gameNew2', 'mugalim (1).txt'),
+        os.path.join(base_dir, 'gameNew2', 'mugalim (2).txt'),
+        os.path.join(base_dir, 'gameNew2', 'mugalim (3).txt'),
+        os.path.join(base_dir, 'gameNew2', 'mugalim (4).txt'),
+        os.path.join(base_dir, 'gameNew2', 'mugalim (5).txt'),
+        os.path.join(base_dir, 'gameNew2', 'nowkie.txt'),
     ]
 
     existing_files = [f for f in game_files if os.path.exists(f)]

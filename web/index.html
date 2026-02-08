@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Тоғызқұмалақ AI</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+    --board-bg: #B8860B;
+    --board-border: #6B4226;
+    --pit-bg: #8B6914;
+    --pit-inner: #704E0E;
+    --pit-border: #5C3D0A;
+    --kazan-bg: #704E0E;
+    --stone-blue: #4477CC;
+    --stone-highlight: #6699EE;
+    --stone-shadow: #2255AA;
+    --text-light: #F5E6C8;
+    --text-dark: #3E2723;
+    --accent-gold: #FFD54F;
+    --accent-red: #EF5350;
+    --tuzdyk-bg: #8B3A3A;
+}
+body {
+    font-family: 'Segoe UI', sans-serif;
+    background: linear-gradient(135deg, #1a0f0a 0%, #2d1f15 50%, #1a0f0a 100%);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    color: var(--text-light);
+}
+h1 {
+    margin: 18px 0 4px;
+    font-size: 26px;
+    color: var(--accent-gold);
+    text-shadow: 0 2px 8px rgba(0,0,0,0.5);
+}
+.subtitle { color: #A1887F; font-size: 13px; margin-bottom: 12px; }
+.game-info {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 780px;
+    margin-bottom: 8px;
+    padding: 8px 20px;
+    background: rgba(93,64,55,0.5);
+    border-radius: 12px;
+}
+.player-info { display: flex; align-items: center; gap: 10px; }
+.player-name { font-weight: bold; font-size: 15px; }
+.player-score {
+    background: var(--accent-gold);
+    color: var(--text-dark);
+    font-weight: bold;
+    font-size: 17px;
+    padding: 3px 12px;
+    border-radius: 8px;
+    min-width: 38px;
+    text-align: center;
+}
+.turn-indicator {
+    background: rgba(255,213,79,0.2);
+    border: 2px solid var(--accent-gold);
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+/* Board */
+.board {
+    background: linear-gradient(160deg, #C49A3C 0%, var(--board-bg) 40%, #A07608 100%);
+    border: 6px solid var(--board-border);
+    border-radius: 16px;
+    padding: 14px 18px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6), inset 0 1px 3px rgba(255,255,255,0.15);
+}
+
+/* Pit rows */
+.pits-row {
+    display: flex;
+    gap: 4px;
+    justify-content: center;
+}
+
+/* Labels row */
+.labels-row {
+    display: flex;
+    gap: 4px;
+    justify-content: center;
+}
+.pit-label {
+    width: 74px;
+    text-align: center;
+    font-size: 13px;
+    font-weight: bold;
+    color: var(--text-light);
+    text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    padding: 2px 0;
+}
+
+/* Individual pit */
+.pit {
+    width: 74px;
+    height: 160px;
+    background: linear-gradient(180deg, var(--pit-inner) 0%, var(--pit-bg) 50%, var(--pit-inner) 100%);
+    border: 2px solid var(--pit-border);
+    border-radius: 10px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    padding-bottom: 4px;
+    cursor: default;
+    transition: all 0.2s;
+    position: relative;
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4);
+    overflow: hidden;
+}
+.pit.clickable { cursor: pointer; }
+.pit.clickable:hover {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 14px var(--accent-gold);
+    border-color: var(--accent-gold);
+}
+.pit.move-source {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 10px rgba(255,152,0,0.8);
+    border-color: #FF9800;
+}
+.pit.move-land {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 10px rgba(76,175,80,0.8);
+    border-color: #4CAF50;
+}
+.pit.sowing-active {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 14px rgba(33,150,243,0.9);
+    border-color: #2196F3;
+    transition: none;
+}
+.pit.tuzdyk {
+    background: linear-gradient(180deg, #6B2020 0%, var(--tuzdyk-bg) 50%, #6B2020 100%);
+    border-color: #AA4444;
+}
+
+.tuzdyk-marker {
+    position: absolute;
+    top: 3px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 9px;
+    color: #FF8A80;
+    font-weight: bold;
+    letter-spacing: 1px;
+}
+
+/* Stones container - 2-column grid, fills from bottom */
+.stones-col {
+    display: flex;
+    flex-wrap: wrap-reverse;
+    align-content: flex-start;
+    justify-content: center;
+    gap: 2px;
+    width: 100%;
+    flex: 1;
+    padding: 4px 4px 0 4px;
+    direction: ltr;
+}
+
+/* Individual stone - blue sphere */
+.stone {
+    border-radius: 50%;
+    background: radial-gradient(circle at 38% 32%, var(--stone-highlight), var(--stone-blue) 55%, var(--stone-shadow));
+    box-shadow: 0 2px 3px rgba(0,0,0,0.4), inset 0 -1px 2px rgba(0,0,0,0.2);
+    flex-shrink: 0;
+}
+
+/* Stone count number */
+.stone-count {
+    font-size: 14px;
+    font-weight: bold;
+    color: var(--text-light);
+    text-shadow: 0 1px 3px rgba(0,0,0,0.8);
+    margin-bottom: 2px;
+    flex-shrink: 0;
+}
+
+/* Kazans - stacked vertically */
+.kazans-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    margin: 6px 0;
+}
+.kazan {
+    width: 100%;
+    min-height: 48px;
+    background: linear-gradient(180deg, var(--pit-inner) 0%, var(--kazan-bg) 50%, var(--pit-inner) 100%);
+    border: 2px solid var(--pit-border);
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    padding: 4px 10px;
+    gap: 8px;
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4);
+}
+.kazan-info {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 70px;
+    flex-shrink: 0;
+}
+.kazan-score {
+    font-size: 22px;
+    font-weight: bold;
+    color: var(--accent-gold);
+}
+.kazan-label {
+    font-size: 11px;
+    color: var(--text-light);
+    opacity: 0.8;
+}
+.kazan-stones {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    align-items: center;
+    justify-content: flex-start;
+    flex: 1;
+    padding: 2px 0;
+}
+
+/* Controls & Settings */
+.settings {
+    margin-top: 10px;
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+    align-items: center;
+}
+.settings label { font-size: 13px; color: #A1887F; }
+.settings select {
+    padding: 5px 10px;
+    border-radius: 6px;
+    border: 1px solid #8D6E63;
+    background: #5D4037;
+    color: var(--text-light);
+    font-size: 13px;
+}
+.controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 12px;
+}
+.btn {
+    padding: 9px 22px;
+    border: none;
+    border-radius: 10px;
+    font-size: 14px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.btn-primary {
+    background: linear-gradient(135deg, var(--accent-gold), #FFC107);
+    color: var(--text-dark);
+}
+.btn-secondary {
+    background: linear-gradient(135deg, #8D6E63, #5D4037);
+    color: var(--text-light);
+}
+.btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+.status {
+    margin-top: 8px;
+    font-size: 14px;
+    color: #A1887F;
+    min-height: 20px;
+}
+.thinking { color: var(--accent-gold); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+.engine-info {
+    margin-top: 6px;
+    font-size: 12px;
+    color: #A1887F;
+    opacity: 0.7;
+}
+
+/* Modal */
+.modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.7);
+    z-index: 100;
+    justify-content: center;
+    align-items: center;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+    background: linear-gradient(145deg, #5D4037, #3E2723);
+    border-radius: 20px;
+    padding: 40px;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+    animation: modalPop 0.3s ease;
+}
+@keyframes modalPop { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.modal h2 { font-size: 28px; color: var(--accent-gold); margin-bottom: 10px; }
+.modal p { font-size: 18px; margin-bottom: 20px; }
+</style>
+</head>
+<body>
+<h1>Тоғызқұмалақ AI</h1>
+<div class="subtitle">NNUE движок v0.1 &mdash; Rust + нейросеть</div>
+
+<div class="game-info">
+    <div class="player-info">
+        <span class="player-name" id="white-name">Игрок (Ақ)</span>
+        <span class="player-score" id="white-score">0</span>
+    </div>
+    <div class="turn-indicator" id="turn">Ход Ақ</div>
+    <div class="player-info">
+        <span class="player-score" id="black-score">0</span>
+        <span class="player-name" id="black-name">Движок (Қара)</span>
+    </div>
+</div>
+
+<div class="board" id="board">
+    <!-- Black labels (top) -->
+    <div class="labels-row" id="black-labels"></div>
+    <!-- Black pits (top row) -->
+    <div class="pits-row" id="black-row"></div>
+    <!-- Kazans stacked vertically -->
+    <div class="kazans-col">
+        <div class="kazan" id="kazan-white">
+            <div class="kazan-info">
+                <span class="kazan-score" id="kazan-w-score">0</span>
+                <span class="kazan-label">Ақ қазан</span>
+            </div>
+            <div class="kazan-stones" id="kazan-w-stones"></div>
+        </div>
+        <div class="kazan" id="kazan-black">
+            <div class="kazan-info">
+                <span class="kazan-score" id="kazan-b-score">0</span>
+                <span class="kazan-label">Қара қазан</span>
+            </div>
+            <div class="kazan-stones" id="kazan-b-stones"></div>
+        </div>
+    </div>
+    <!-- White pits (bottom row) -->
+    <div class="pits-row" id="white-row"></div>
+    <!-- White labels (bottom) -->
+    <div class="labels-row" id="white-labels"></div>
+</div>
+
+<div class="settings">
+    <label>Сіз ойнайсыз:
+        <select id="player-side">
+            <option value="0">Ақ (бірінші)</option>
+            <option value="1">Қара (екінші)</option>
+        </select>
+    </label>
+    <label>Уақыт:
+        <select id="engine-time">
+            <option value="1000">1 сек</option>
+            <option value="3000" selected>3 сек</option>
+            <option value="5000">5 сек</option>
+            <option value="10000">10 сек</option>
+        </select>
+    </label>
+</div>
+
+<div class="controls">
+    <button class="btn btn-primary" onclick="newGame()">Жаңа ойын</button>
+    <button class="btn btn-secondary" onclick="undoMove()">Артқа</button>
+</div>
+
+<div class="status" id="status"></div>
+<div class="engine-info" id="engine-info"></div>
+
+<div class="modal-overlay" id="modal">
+    <div class="modal">
+        <h2 id="modal-title">Ойын аяқталды</h2>
+        <p id="modal-text"></p>
+        <button class="btn btn-primary" onclick="closeModal(); newGame();">Қайтадан ойнау</button>
+    </div>
+</div>
+
+<script>
+const WHITE_LABELS = ['1','2','3','4','5','6','7','8','9'];
+const BLACK_LABELS = ['9','8','7','6','5','4','3','2','1'];
+
+let board = {
+    pits: [[9,9,9,9,9,9,9,9,9],[9,9,9,9,9,9,9,9,9]],
+    kazan: [0, 0],
+    tuzdyk: [-1, -1],
+    side_to_move: 0
+};
+let moveHistory = [];
+let humanSide = 0;
+let engineThinking = false;
+let gameOver = false;
+let lastMove = null; // {side, pit, landSide, landPit} for highlighting
+let animating = false;
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function getPitElement(side, pit) {
+    return document.querySelector(`.pit[data-side="${side}"][data-pit="${pit}"]`);
+}
+
+async function animateMove(pit) {
+    const me = board.side_to_move;
+    const opp = 1 - me;
+    let stones = board.pits[me][pit];
+    if (stones === 0) return;
+
+    animating = true;
+    const delay = stones > 20 ? 60 : stones > 10 ? 100 : 150;
+
+    // Work on animation copy
+    let anim = JSON.parse(JSON.stringify(board));
+
+    // Pick up stones
+    let sowCount;
+    if (stones === 1) {
+        anim.pits[me][pit] = 0;
+        sowCount = 1;
+    } else {
+        anim.pits[me][pit] = 1;
+        sowCount = stones - 1;
+    }
+
+    // Show source picked up
+    lastMove = {side: me, pit: pit, landSide: -1, landPit: -1};
+    const realBoard = board;
+    board = anim;
+    render();
+    await sleep(delay + 50);
+
+    // Distribute one by one
+    let curSide = me;
+    let curPit = pit;
+
+    for (let s = 0; s < sowCount; s++) {
+        curPit++;
+        if (curPit >= 9) { curPit = 0; curSide = 1 - curSide; }
+
+        anim.pits[curSide][curPit] += 1;
+        lastMove = {side: me, pit: pit, landSide: curSide, landPit: curPit};
+        board = anim;
+        render();
+
+        // Blue highlight on just-sowed pit
+        const el = getPitElement(curSide, curPit);
+        if (el) el.classList.add('sowing-active');
+
+        await sleep(delay);
+    }
+
+    // Restore real board
+    board = realBoard;
+    animating = false;
+}
+
+function newGame() {
+    humanSide = parseInt(document.getElementById('player-side').value);
+    board = {
+        pits: [[9,9,9,9,9,9,9,9,9],[9,9,9,9,9,9,9,9,9]],
+        kazan: [0, 0],
+        tuzdyk: [-1, -1],
+        side_to_move: 0
+    };
+    moveHistory = [];
+    engineThinking = false;
+    gameOver = false;
+    lastMove = null;
+    document.getElementById('white-name').textContent = humanSide === 0 ? 'Сіз (Ақ)' : 'Движок (Ақ)';
+    document.getElementById('black-name').textContent = humanSide === 1 ? 'Сіз (Қара)' : 'Движок (Қара)';
+    setStatus('');
+    document.getElementById('engine-info').textContent = '';
+    closeModal();
+    render();
+    if (board.side_to_move !== humanSide) {
+        engineMove();
+    }
+}
+
+// ---- Game Logic (client-side, mirrors Rust engine) ----
+function makeMove(state, pit) {
+    const me = state.side_to_move;
+    const opp = 1 - me;
+    let stones = state.pits[me][pit];
+    if (stones === 0) return null;
+
+    const snapshot = JSON.parse(JSON.stringify(state));
+
+    let landSide, landPit;
+    if (stones === 1) {
+        state.pits[me][pit] = 0;
+        let nextPit = pit + 1;
+        let nextSide = me;
+        if (nextPit >= 9) { nextPit = 0; nextSide = opp; }
+        state.pits[nextSide][nextPit] += 1;
+        landSide = nextSide; landPit = nextPit;
+
+        if (nextSide === opp) {
+            if (state.pits[opp][nextPit] === 3 && nextPit !== 8 && state.tuzdyk[me] === -1 &&
+                state.tuzdyk[opp] !== nextPit) {
+                state.tuzdyk[me] = nextPit;
+                state.kazan[me] += state.pits[opp][nextPit];
+                state.pits[opp][nextPit] = 0;
+            } else if (state.pits[opp][nextPit] % 2 === 0 && state.pits[opp][nextPit] > 0) {
+                state.kazan[me] += state.pits[opp][nextPit];
+                state.pits[opp][nextPit] = 0;
+            }
+        }
+    } else {
+        state.pits[me][pit] = 1;
+        stones -= 1;
+        let curSide = me;
+        let curPit = pit;
+
+        for (let s = 0; s < stones; s++) {
+            curPit++;
+            if (curPit >= 9) {
+                curPit = 0;
+                curSide = 1 - curSide;
+            }
+            state.pits[curSide][curPit] += 1;
+        }
+        landSide = curSide; landPit = curPit;
+
+        if (curSide === opp) {
+            if (state.pits[opp][curPit] === 3 && curPit !== 8 && state.tuzdyk[me] === -1 &&
+                state.tuzdyk[opp] !== curPit) {
+                state.tuzdyk[me] = curPit;
+                state.kazan[me] += state.pits[opp][curPit];
+                state.pits[opp][curPit] = 0;
+            } else if (state.pits[opp][curPit] % 2 === 0 && state.pits[opp][curPit] > 0) {
+                state.kazan[me] += state.pits[opp][curPit];
+                state.pits[opp][curPit] = 0;
+            }
+        }
+    }
+    lastMove = {side: me, pit: pit, landSide: landSide, landPit: landPit};
+
+    for (let side = 0; side < 2; side++) {
+        if (state.tuzdyk[side] >= 0) {
+            const tuzPit = state.tuzdyk[side];
+            const oppSide = 1 - side;
+            if (state.pits[oppSide][tuzPit] > 0) {
+                state.kazan[side] += state.pits[oppSide][tuzPit];
+                state.pits[oppSide][tuzPit] = 0;
+            }
+        }
+    }
+
+    state.side_to_move = opp;
+    return snapshot;
+}
+
+function isValidMove(state, pit) {
+    const me = state.side_to_move;
+    const opp = 1 - me;
+    return state.pits[me][pit] > 0 && state.tuzdyk[opp] !== pit;
+}
+
+function getGameResult(state) {
+    if (state.kazan[0] >= 82) return 'white';
+    if (state.kazan[1] >= 82) return 'black';
+    if (state.kazan[0] === 81 && state.kazan[1] === 81) return 'draw';
+
+    const me = state.side_to_move;
+    const opp = 1 - me;
+    let hasMoves = false;
+    for (let i = 0; i < 9; i++) {
+        if (state.pits[me][i] > 0 && state.tuzdyk[opp] !== i) {
+            hasMoves = true;
+            break;
+        }
+    }
+    if (!hasMoves) {
+        let remaining = 0;
+        for (let i = 0; i < 9; i++) remaining += state.pits[opp][i];
+        const totalMe = state.kazan[me];
+        const totalOpp = state.kazan[opp] + remaining;
+        if (totalMe > totalOpp) return me === 0 ? 'white' : 'black';
+        if (totalOpp > totalMe) return opp === 0 ? 'white' : 'black';
+        return 'draw';
+    }
+    return null;
+}
+
+// ---- Rendering ----
+function render() {
+    const whiteRow = document.getElementById('white-row');
+    const blackRow = document.getElementById('black-row');
+    const whiteLabels = document.getElementById('white-labels');
+    const blackLabels = document.getElementById('black-labels');
+    whiteRow.innerHTML = '';
+    blackRow.innerHTML = '';
+    whiteLabels.innerHTML = '';
+    blackLabels.innerHTML = '';
+
+    // Black pits (top, reversed)
+    for (let i = 8; i >= 0; i--) {
+        blackRow.appendChild(createPit(1, i));
+        const lbl = document.createElement('div');
+        lbl.className = 'pit-label';
+        lbl.textContent = BLACK_LABELS[8 - i];
+        blackLabels.appendChild(lbl);
+    }
+
+    // White pits (bottom, left to right)
+    for (let i = 0; i < 9; i++) {
+        whiteRow.appendChild(createPit(0, i));
+        const lbl = document.createElement('div');
+        lbl.className = 'pit-label';
+        lbl.textContent = WHITE_LABELS[i];
+        whiteLabels.appendChild(lbl);
+    }
+
+    document.getElementById('white-score').textContent = board.kazan[0];
+    document.getElementById('black-score').textContent = board.kazan[1];
+    document.getElementById('kazan-w-score').textContent = board.kazan[0];
+    document.getElementById('kazan-b-score').textContent = board.kazan[1];
+
+    renderKazanStones('kazan-w-stones', board.kazan[0]);
+    renderKazanStones('kazan-b-stones', board.kazan[1]);
+
+    const side = board.side_to_move === 0 ? 'Ақ' : 'Қара';
+    document.getElementById('turn').textContent = `Ход: ${side}`;
+}
+
+function renderKazanStones(containerId, count) {
+    const container = document.getElementById(containerId);
+    container.innerHTML = '';
+    // Show stones: max ~40 visible, shrink if many
+    const maxVisible = Math.min(count, 50);
+    const size = count <= 20 ? 12 : count <= 40 ? 9 : 7;
+    for (let i = 0; i < maxVisible; i++) {
+        const s = document.createElement('div');
+        s.className = 'stone';
+        s.style.width = size + 'px';
+        s.style.height = size + 'px';
+        container.appendChild(s);
+    }
+}
+
+function createPit(side, idx) {
+    const div = document.createElement('div');
+    div.className = 'pit';
+    div.dataset.side = side;
+    div.dataset.pit = idx;
+    const stones = board.pits[side][idx];
+
+    // Last move highlighting
+    if (lastMove) {
+        if (lastMove.side === side && lastMove.pit === idx) div.classList.add('move-source');
+        if (lastMove.landSide === side && lastMove.landPit === idx) div.classList.add('move-land');
+    }
+
+    // Tuzdyk styling
+    const isOppTuzdyk = board.tuzdyk[1-side] === idx;
+    if (isOppTuzdyk) {
+        div.classList.add('tuzdyk');
+        const marker = document.createElement('span');
+        marker.className = 'tuzdyk-marker';
+        marker.textContent = 'ТҰЗ';
+        div.appendChild(marker);
+    }
+
+    // Clickable
+    const isHumanSide = side === humanSide;
+    const isHumanTurn = board.side_to_move === humanSide;
+    if (isHumanSide && isHumanTurn && !engineThinking && !animating && !gameOver && isValidMove(board, idx)) {
+        div.classList.add('clickable');
+        div.onclick = () => humanMove(idx);
+    }
+
+    // Stones container - 2-column grid with dynamic sizing
+    const stonesCol = document.createElement('div');
+    stonesCol.className = 'stones-col';
+
+    // 2 columns, available height ~130px
+    const availableHeight = 130;
+    const rows = Math.ceil(stones / 2);
+    let stoneSize, displayCount;
+
+    if (stones === 0) {
+        displayCount = 0;
+        stoneSize = 16;
+    } else if (rows <= 6) {
+        // Fits nicely: up to 12 stones (6 rows x 2)
+        stoneSize = Math.min(20, Math.floor(availableHeight / rows) - 3);
+        stoneSize = Math.max(stoneSize, 10);
+        displayCount = stones;
+    } else if (rows <= 10) {
+        // Medium: up to 20 stones
+        stoneSize = Math.floor(availableHeight / rows) - 2;
+        stoneSize = Math.max(stoneSize, 8);
+        displayCount = stones;
+    } else {
+        // Many stones: small, show as many as fit
+        stoneSize = 8;
+        const maxRows = Math.floor(availableHeight / (stoneSize + 2));
+        displayCount = Math.min(stones, maxRows * 2);
+    }
+
+    for (let s = 0; s < displayCount; s++) {
+        const stone = document.createElement('div');
+        stone.className = 'stone';
+        stone.style.width = stoneSize + 'px';
+        stone.style.height = stoneSize + 'px';
+        stonesCol.appendChild(stone);
+    }
+    div.appendChild(stonesCol);
+
+    // Count number
+    const countDiv = document.createElement('div');
+    countDiv.className = 'stone-count';
+    countDiv.textContent = stones;
+    div.appendChild(countDiv);
+
+    return div;
+}
+
+// ---- Game Flow ----
+async function humanMove(pit) {
+    if (engineThinking || animating || gameOver) return;
+    if (!isValidMove(board, pit)) return;
+
+    await animateMove(pit);
+
+    const snapshot = makeMove(board, pit);
+    moveHistory.push(snapshot);
+    render();
+
+    const result = getGameResult(board);
+    if (result) {
+        showResult(result);
+        return;
+    }
+    engineMove();
+}
+
+async function engineMove() {
+    if (gameOver) return;
+    engineThinking = true;
+    setStatus('Движок ойлайды...');
+    render();
+
+    const timeMs = parseInt(document.getElementById('engine-time').value);
+
+    try {
+        const resp = await fetch('/api/move', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ board: board, time_ms: timeMs })
+        });
+        const data = await resp.json();
+
+        if (data.error) {
+            setStatus('Қате: ' + data.error);
+            engineThinking = false;
+            render();
+            return;
+        }
+
+        if (data.terminal) {
+            showResult(data.result === 'white_win' ? 'white' : data.result === 'black_win' ? 'black' : 'draw');
+            engineThinking = false;
+            return;
+        }
+
+        const pit = data.bestmove;
+
+        engineThinking = false;
+        setStatus('');
+        await animateMove(pit);
+
+        const snapshot = makeMove(board, pit);
+        moveHistory.push(snapshot);
+
+        document.getElementById('engine-info').textContent =
+            `Отау ${pit+1} | Баға: ${data.score} | Тереңдік: ${data.depth} | ${(data.nodes/1000).toFixed(0)}K түйін | ${data.time_ms} мс`;
+
+        setStatus('');
+        render();
+
+        const result = getGameResult(board);
+        if (result) {
+            showResult(result);
+        }
+    } catch (e) {
+        setStatus('Байланыс қатесі: ' + e.message);
+        engineThinking = false;
+        render();
+    }
+}
+
+function undoMove() {
+    if (engineThinking || animating || moveHistory.length < 2) return;
+    moveHistory.pop();
+    board = JSON.parse(JSON.stringify(moveHistory.pop()));
+    gameOver = false;
+    closeModal();
+    setStatus('');
+    document.getElementById('engine-info').textContent = '';
+    render();
+}
+
+function showResult(result) {
+    gameOver = true;
+    const modal = document.getElementById('modal');
+    const title = document.getElementById('modal-title');
+    const text = document.getElementById('modal-text');
+
+    if (result === 'draw') {
+        title.textContent = 'Тең!';
+        text.textContent = `${board.kazan[0]} – ${board.kazan[1]}`;
+    } else {
+        const isHumanWin = (result === 'white' && humanSide === 0) || (result === 'black' && humanSide === 1);
+        title.textContent = isHumanWin ? 'Сіз жеңдіңіз!' : 'Движок жеңді!';
+        text.textContent = `Ақ ${board.kazan[0]} – ${board.kazan[1]} Қара`;
+    }
+    modal.classList.add('active');
+}
+
+function closeModal() { document.getElementById('modal').classList.remove('active'); }
+function setStatus(msg) {
+    const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = msg.includes('ойлайды') ? 'status thinking' : 'status';
+}
+
+newGame();
+</script>
+</body>
+</html>
