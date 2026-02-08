@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Training artifacts
+checkpoints/
+logs/
+*.pt
+*.onnx
+*.onnx.data
+
+# Large parsed data (regenerate with parse_games.py)
+parsed_games/*.npz
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
