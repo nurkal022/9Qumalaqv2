@@ -14,8 +14,13 @@ logs/
 *.onnx
 *.onnx.data
 
-# Large parsed data (regenerate with parse_games.py)
+# Large parsed/generated data
 parsed_games/*.npz
+parsed_games/all_games.json
+engine/training_data.bin
+engine/positions.txt
+report/
+report.zip
 
 # Rust build artifacts
 engine/target/

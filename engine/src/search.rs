@@ -12,6 +12,7 @@
 use std::time::Instant;
 use crate::board::{Board, GameResult, NUM_PITS};
 use crate::eval::{evaluate, EVAL_INF, EVAL_MATE};
+use crate::nnue::NnueNetwork;
 use crate::tt::{TranspositionTable, TTFlag};
 use crate::zobrist::ZobristKeys;
 
@@ -33,10 +34,12 @@ pub struct Searcher {
     pub zobrist: ZobristKeys,
     pub nodes: u64,
     pub max_time_ms: u64,
+    pub silent: bool,
     start_time: Instant,
     stopped: bool,
     killer_moves: [[i8; 2]; MAX_DEPTH as usize], // [depth][slot]
     history: [[i32; NUM_PITS]; 2], // [side][pit] history heuristic
+    nnue: Option<NnueNetwork>,
 }
 
 impl Searcher {
@@ -46,10 +49,25 @@ impl Searcher {
             zobrist: ZobristKeys::new(),
             nodes: 0,
             max_time_ms: 5000,
+            silent: false,
             start_time: Instant::now(),
             stopped: false,
             killer_moves: [[-1; 2]; MAX_DEPTH as usize],
             history: [[0; NUM_PITS]; 2],
+            nnue: None,
+        }
+    }
+
+    pub fn set_nnue(&mut self, nnue: NnueNetwork) {
+        self.nnue = Some(nnue);
+    }
+
+    /// Evaluate using NNUE if available, otherwise handcrafted
+    fn eval(&self, board: &Board) -> i32 {
+        if let Some(ref nnue) = self.nnue {
+            nnue.evaluate(board)
+        } else {
+            evaluate(board)
         }
     }
 
@@ -71,7 +89,7 @@ impl Searcher {
         if num_moves == 0 {
             return SearchResult {
                 best_move: 0,
-                score: evaluate(board),
+                score: self.eval(board),
                 depth: 0,
                 nodes: 0,
                 tt_hits: 0,
@@ -105,15 +123,17 @@ impl Searcher {
                 self.nodes
             };
 
-            eprintln!(
-                "info depth {} score {} nodes {} nps {} time {} pv pit{}",
-                depth,
-                best_score,
-                self.nodes,
-                nps,
-                elapsed,
-                best_move + 1,
-            );
+            if !self.silent {
+                eprintln!(
+                    "info depth {} score {} nodes {} nps {} time {} pv pit{}",
+                    depth,
+                    best_score,
+                    self.nodes,
+                    nps,
+                    elapsed,
+                    best_move + 1,
+                );
+            }
 
             // If we found a mate, no need to search deeper
             if best_score.abs() > EVAL_MATE - 100 {
@@ -226,7 +246,7 @@ impl Searcher {
 
         if num_moves == 0 {
             // No valid moves — evaluate
-            return evaluate(board);
+            return self.eval(board);
         }
 
         // Order moves
@@ -346,7 +366,7 @@ impl Searcher {
             };
         }
 
-        let stand_pat = evaluate(board);
+        let stand_pat = self.eval(board);
 
         if stand_pat >= beta {
             return stand_pat;

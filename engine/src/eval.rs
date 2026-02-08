@@ -5,16 +5,17 @@
 
 use crate::board::{Board, NUM_PITS};
 
-/// Evaluation weights (will be tuned via Texel tuning later)
-const MATERIAL_WEIGHT: i32 = 100;     // per stone in kazan
-const TUZDYK_BASE: i32 = 800;         // having a tuzdyk
-const TUZDYK_CENTER_BONUS: i32 = 50;  // per position towards center (pits 3-7)
-const THREAT_WEIGHT: i32 = 150;       // opponent pit with 2 stones (potential tuzdyk threat)
-const PIT_STONES_WEIGHT: i32 = 10;    // stones in own pits (potential material)
-const MOBILITY_WEIGHT: i32 = 20;      // per available move
-const EMPTY_PIT_PENALTY: i32 = -15;   // per empty pit on own side
-const LARGE_PIT_BONUS: i32 = 5;       // per stone in pits with 10+ stones
-const ENDGAME_MATERIAL_BOOST: i32 = 50; // extra material weight in endgame
+/// Evaluation weights — Texel-tuned from 77K PlayOK positions (44% error reduction)
+const MATERIAL_WEIGHT: i32 = 21;
+const TUZDYK_BASE: i32 = 504;
+const TUZDYK_CENTER_BONUS: i32 = 63;
+const THREAT_WEIGHT: i32 = 11;        // tuzdyk creation threat
+const PIT_STONES_WEIGHT: i32 = 3;
+const MOBILITY_WEIGHT: i32 = 124;     // most important positional factor
+const EMPTY_PIT_PENALTY: i32 = -5;
+const LARGE_PIT_BONUS: i32 = 1;
+const ENDGAME_MATERIAL_BOOST: i32 = -6;
+const CAPTURE_OPP_WEIGHT: i32 = 4;
 
 /// Maximum possible eval (for mate scores)
 pub const EVAL_INF: i32 = 100_000;
@@ -84,21 +85,11 @@ pub fn evaluate(board: &Board) -> i32 {
         score -= center_bonus * TUZDYK_CENTER_BONUS;
     }
 
-    // 3. Tuzdyk threats (opponent pits with 2 stones = one move from becoming 3)
+    // 3. Tuzdyk threats (opponent pits with 2 stones = one move from 3 = tuzdyk opportunity)
     if board.tuzdyk[me] == -1 {
-        // We don't have a tuzdyk yet — opponent pits with 2 are threats for US to create one
         for i in 0..8 {
-            // pit 9 (index 8) can't become tuzdyk
             if board.pits[opp][i] == 2 && board.tuzdyk[opp] != i as i8 {
                 score += THREAT_WEIGHT;
-            }
-        }
-    }
-    if board.tuzdyk[opp] == -1 {
-        // Opponent doesn't have tuzdyk — our pits with 2 are threats for THEM
-        for i in 0..8 {
-            if board.pits[me][i] == 2 && board.tuzdyk[me] != i as i8 {
-                score -= THREAT_WEIGHT / 2; // less weight since it's opponent's opportunity
             }
         }
     }
@@ -138,30 +129,26 @@ pub fn evaluate(board: &Board) -> i32 {
         }
     }
 
-    // 8. Capture opportunities: check if moves lead to immediate capture
-    // Our capture opportunities
+    // 8. Capture opportunities
     for i in 0..NUM_PITS {
         if board.pits[me][i] > 0 && opp_tuzdyk != i as i8 {
-            let landing = predict_landing(i, board.pits[me][i], me);
-            if let Some((side, pit)) = landing {
+            if let Some((side, pit)) = predict_landing(i, board.pits[me][i], me) {
                 if side == opp {
                     let new_count = board.pits[opp][pit] + 1;
                     if new_count % 2 == 0 && new_count > 0 {
-                        score += new_count as i32 * 8;
+                        score += new_count as i32 * CAPTURE_OPP_WEIGHT;
                     }
                 }
             }
         }
     }
-    // Opponent's capture opportunities
     for i in 0..NUM_PITS {
         if board.pits[opp][i] > 0 && me_tuzdyk != i as i8 {
-            let landing = predict_landing(i, board.pits[opp][i], opp);
-            if let Some((side, pit)) = landing {
+            if let Some((side, pit)) = predict_landing(i, board.pits[opp][i], opp) {
                 if side == me {
                     let new_count = board.pits[me][pit] + 1;
                     if new_count % 2 == 0 && new_count > 0 {
-                        score -= new_count as i32 * 8;
+                        score -= new_count as i32 * CAPTURE_OPP_WEIGHT;
                     }
                 }
             }
