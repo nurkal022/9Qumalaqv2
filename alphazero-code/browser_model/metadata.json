@@ -1,0 +1,32 @@
+{
+  "iteration": 50,
+  "total_games": 5000,
+  "config": {
+    "model_size": "medium",
+    "games_per_iteration": 100,
+    "num_simulations": 200,
+    "temperature_threshold": 15,
+    "num_parallel_games": 32,
+    "batch_size": 512,
+    "learning_rate": 0.002,
+    "weight_decay": 0.0001,
+    "num_epochs": 5,
+    "buffer_size": 100000,
+    "min_buffer_size": 2000,
+    "num_iterations": 50,
+    "eval_interval": 10,
+    "save_interval": 20,
+    "eval_games": 30,
+    "checkpoint_dir": "checkpoints",
+    "log_dir": "logs"
+  },
+  "input_shape": [
+    7,
+    9
+  ],
+  "output_policy_size": 9,
+  "normalization": {
+    "pit_factor": 50.0,
+    "kazan_factor": 82.0
+  }
+}

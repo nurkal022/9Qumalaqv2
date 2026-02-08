@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="kk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Тоғызқұмалақ</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Start Screen -->
+    <div class="start-screen" id="startScreen">
+        <div class="start-content">
+            <div class="start-logo">
+                <div class="logo-stones">
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                    <span class="logo-stone"></span>
+                </div>
+                <h1 class="start-title">Тоғызқұмалақ</h1>
+                <p class="start-subtitle">Дәстүрлі қазақ ойыны</p>
+            </div>
+
+            <div class="start-menu">
+                <h2 class="menu-title">Ойын режимі</h2>
+                
+                <div class="mode-selection">
+                    <button class="mode-btn active" data-mode="pvp" id="modePvp">
+                        <span class="mode-icon">👥</span>
+                        <span class="mode-name">1 vs 1</span>
+                        <span class="mode-desc">Екі ойыншы</span>
+                    </button>
+                    <button class="mode-btn" data-mode="bot" id="modeBot">
+                        <span class="mode-icon">🤖</span>
+                        <span class="mode-name">vs Бот</span>
+                        <span class="mode-desc">Жасанды интеллект</span>
+                    </button>
+                </div>
+
+                <div class="difficulty-section" id="difficultySection" style="display: none;">
+                    <h2 class="menu-title">Бот деңгейі</h2>
+                    <div class="difficulty-grid">
+                        <button class="diff-btn" data-level="easy">
+                            <span class="diff-name">Жеңіл</span>
+                            <span class="diff-stars">⭐</span>
+                        </button>
+                        <button class="diff-btn" data-level="medium">
+                            <span class="diff-name">Орташа</span>
+                            <span class="diff-stars">⭐⭐</span>
+                        </button>
+                        <button class="diff-btn active" data-level="hard">
+                            <span class="diff-name">Қиын</span>
+                            <span class="diff-stars">⭐⭐⭐</span>
+                        </button>
+                        <button class="diff-btn" data-level="expert">
+                            <span class="diff-name">Эксперт</span>
+                            <span class="diff-stars">⭐⭐⭐⭐</span>
+                        </button>
+                        <button class="diff-btn" data-level="master">
+                            <span class="diff-name">Мастер</span>
+                            <span class="diff-stars">⭐⭐⭐⭐⭐</span>
+                        </button>
+                        <button class="diff-btn" data-level="grandmaster">
+                            <span class="diff-name">Гроссмейстер</span>
+                            <span class="diff-stars">🏆</span>
+                        </button>
+                        <button class="diff-btn diff-super" data-level="super">
+                            <span class="diff-name">Супер</span>
+                            <span class="diff-stars">👑</span>
+                            <span class="diff-info">100K симуляций</span>
+                        </button>
+                        <button class="diff-btn diff-alphazero" data-level="alphazero">
+                            <span class="diff-name">AlphaZero</span>
+                            <span class="diff-stars">🤖</span>
+                            <span class="diff-info">Нейросеть + MCTS</span>
+                        </button>
+                    </div>
+                </div>
+
+                <button class="start-game-btn" id="startGameBtn">
+                    <span>Ойынды бастау</span>
+                    <span class="btn-arrow">→</span>
+                </button>
+            </div>
+
+            <div class="start-footer">
+                <p>Ережелер: бірінші 82 тас жинаған жеңеді</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="game-container" id="gameContainer" style="display: none;">
+        <header class="game-header">
+            <h1>Тоғызқұмалақ</h1>
+            <div class="game-controls">
+                <button id="menuBtn" class="btn btn-menu">← Мәзір</button>
+                <button id="newGameBtn" class="btn btn-primary">Жаңа ойын</button>
+                <button id="modeToggleBtn" class="btn btn-secondary">Режим: 1 vs 1</button>
+                <button id="difficultyBtn" class="btn btn-difficulty">AI: Қиын</button>
+            </div>
+        </header>
+
+        <div class="game-info">
+            <div class="player-info player-top">
+                <span class="player-name">Қара</span>
+                <span class="player-score" id="scoreBlack">0</span>
+                <span class="tuzdyk-indicator" id="tuzdykBlack"></span>
+            </div>
+            <div class="turn-indicator">
+                <span id="turnText">Ақтың кезегі</span>
+            </div>
+            <div class="player-info player-bottom">
+                <span class="player-name">Ақ</span>
+                <span class="player-score" id="scoreWhite">0</span>
+                <span class="tuzdyk-indicator" id="tuzdykWhite"></span>
+            </div>
+        </div>
+
+        <div class="board">
+            <!-- Black player's pits (top row) -->
+            <div class="pits-section pits-black">
+                <div class="pit-numbers top">
+                    <span>9</span><span>8</span><span>7</span><span>6</span><span>5</span><span>4</span><span>3</span><span>2</span><span>1</span>
+                </div>
+                <div class="pits-row">
+                    <div class="pit" data-player="black" data-pit="8"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="7"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="6"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="5"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="4"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="3"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="2"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="1"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                    <div class="pit" data-player="black" data-pit="0"><div class="stones-area"><div class="stones-container"></div></div><div class="count-area"><span class="stone-count">9</span></div></div>
+                </div>
+            </div>
+
+            <!-- Kazans in the middle - swapped: your kazan near opponent -->
+            <div class="kazans-row">
+                <div class="kazan kazan-white" id="kazanWhite">
+                    <div class="kazan-stones"></div>
+                    <span class="kazan-count">0</span>
+                </div>
+                <div class="kazan kazan-black" id="kazanBlack">
+                    <div class="kazan-stones"></div>
+                    <span class="kazan-count">0</span>
+                </div>
+            </div>
+
+            <!-- White player's pits (bottom row) -->
+            <div class="pits-section pits-white">
+                <div class="pits-row">
+                    <div class="pit" data-player="white" data-pit="0"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="1"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="2"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="3"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="4"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="5"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="6"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="7"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                    <div class="pit" data-player="white" data-pit="8"><div class="count-area"><span class="stone-count">9</span></div><div class="stones-area"><div class="stones-container"></div></div></div>
+                </div>
+                <div class="pit-numbers bottom">
+                    <span>1</span><span>2</span><span>3</span><span>4</span><span>5</span><span>6</span><span>7</span><span>8</span><span>9</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="game-log">
+            <h3>Соңғы ход</h3>
+            <div id="lastMove">—</div>
+        </div>
+
+        <div class="logger-controls">
+            <button id="exportDataBtn" class="btn btn-small">📊 Export Data</button>
+            <button id="logStatsBtn" class="btn btn-small">📈 Stats</button>
+            <span id="gamesLogged" class="games-count">0 games</span>
+        </div>
+
+        <!-- Win modal -->
+        <div class="modal" id="winModal" style="display: none;">
+            <div class="modal-content">
+                <h2 id="winnerText">Ойын аяқталды!</h2>
+                <p id="finalScore"></p>
+                <button id="playAgainBtn" class="btn btn-primary">Қайта ойнау</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/ort.min.js"></script>
+    <script src="alphazero-inference.js"></script>
+    <script src="game.js"></script>
+</body>
+</html>
