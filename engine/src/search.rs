@@ -40,6 +40,10 @@ pub struct Searcher {
     killer_moves: [[i8; 2]; MAX_DEPTH as usize], // [depth][slot]
     history: [[i32; NUM_PITS]; 2], // [side][pit] history heuristic
     nnue: Option<NnueNetwork>,
+    /// Positions played in the actual game (for repetition detection)
+    pub game_history: Vec<u64>,
+    /// Search path hashes (indexed by ply, for in-tree repetition detection)
+    search_path: [u64; MAX_DEPTH as usize],
 }
 
 impl Searcher {
@@ -55,6 +59,8 @@ impl Searcher {
             killer_moves: [[-1; 2]; MAX_DEPTH as usize],
             history: [[0; NUM_PITS]; 2],
             nnue: None,
+            game_history: Vec::new(),
+            search_path: [0; MAX_DEPTH as usize],
         }
     }
 
@@ -62,10 +68,40 @@ impl Searcher {
         self.nnue = Some(nnue);
     }
 
-    /// Evaluate using NNUE if available, otherwise handcrafted
+    /// Push a position hash to game history (call after each actual game move)
+    pub fn push_game_position(&mut self, hash: u64) {
+        self.game_history.push(hash);
+    }
+
+    /// Compute hash for a board position
+    pub fn compute_hash(&self, board: &Board) -> u64 {
+        self.zobrist.hash(board)
+    }
+
+    /// Evaluate using NNUE if available, otherwise handcrafted.
+    /// In endgame positions, blend NNUE with HCE since HCE has
+    /// Texel-tuned endgame knowledge the NNUE lacks.
     fn eval(&self, board: &Board) -> i32 {
         if let Some(ref nnue) = self.nnue {
-            nnue.evaluate(board)
+            let nnue_score = nnue.evaluate(board);
+
+            // Count stones on the board (not in kazans)
+            let total_board_stones: u16 = board.pits[0].iter().map(|&x| x as u16).sum::<u16>()
+                + board.pits[1].iter().map(|&x| x as u16).sum::<u16>();
+
+            if total_board_stones <= 30 {
+                // Endgame: blend with HCE which has strong endgame knowledge
+                let hce_score = evaluate(board);
+                if total_board_stones <= 15 {
+                    // Deep endgame: 75% HCE, 25% NNUE
+                    (nnue_score + hce_score * 3) / 4
+                } else {
+                    // Endgame: 50/50 blend
+                    (nnue_score + hce_score) / 2
+                }
+            } else {
+                nnue_score
+            }
         } else {
             evaluate(board)
         }
@@ -192,8 +228,33 @@ impl Searcher {
             return self.quiescence(board, alpha, beta, ply);
         }
 
+        // Hard ply limit to prevent stack overflow from extensions
+        if ply >= MAX_DEPTH - 2 {
+            return self.eval(board);
+        }
+
         // TT probe
         let hash = self.zobrist.hash(board);
+
+        // === REPETITION DETECTION ===
+        // Store current hash in search path
+        self.search_path[ply as usize] = hash;
+
+        if ply > 0 {
+            // Check game history (positions already played)
+            for &h in &self.game_history {
+                if h == hash {
+                    return 0; // repetition = draw
+                }
+            }
+            // Check search path (in-tree repetition)
+            for i in 0..(ply as usize) {
+                if self.search_path[i] == hash {
+                    return 0; // cycle in search tree
+                }
+            }
+        }
+
         let mut tt_move: i8 = -1;
 
         if let Some(entry) = self.tt.probe(hash) {
@@ -218,13 +279,20 @@ impl Searcher {
             }
         }
 
-        // Null move pruning (skip if in endgame with few pieces)
-        let total_stones: u16 = board.pits[board.side_to_move.index()]
+        // === ENDGAME DETECTION ===
+        // Count total stones on board (both sides' pits, not kazans)
+        let total_board_stones: u16 = board.pits[0].iter().map(|&x| x as u16).sum::<u16>()
+            + board.pits[1].iter().map(|&x| x as u16).sum::<u16>();
+        let is_endgame = total_board_stones <= 30;
+        let is_deep_endgame = total_board_stones <= 15;
+
+        // Null move pruning (skip in endgame — every move matters)
+        let my_stones: u16 = board.pits[board.side_to_move.index()]
             .iter()
             .map(|&x| x as u16)
             .sum();
 
-        if depth >= 3 && total_stones > 10 && ply > 0 {
+        if depth >= 3 && my_stones > 10 && !is_endgame && ply > 0 {
             let mut null_board = *board;
             null_board.side_to_move = null_board.side_to_move.opposite();
             null_board.move_count += 1;
@@ -267,6 +335,12 @@ impl Searcher {
             }
         }
 
+        // === ENDGAME DEPTH EXTENSION ===
+        // Only extend near the root to avoid exponential blowup
+        let endgame_ext: i32 = if ply <= 3 && is_deep_endgame { 1 }
+            else if ply == 0 && is_endgame { 1 }
+            else { 0 };
+
         let mut best_score = -EVAL_INF;
         let mut best_move: i8 = moves[0] as i8;
         let mut flag = TTFlag::UpperBound;
@@ -279,25 +353,26 @@ impl Searcher {
             let score;
 
             // LMR: reduce depth for late quiet moves
-            if i >= LMR_THRESHOLD && depth >= 3 {
+            // DISABLE LMR in endgame — all moves matter when few stones remain
+            if i >= LMR_THRESHOLD && depth >= 3 && !is_endgame {
                 // Reduced search
                 let reduced = -self.alpha_beta(&new_board, depth - 2, -alpha - 1, -alpha, ply + 1);
                 if reduced > alpha {
-                    // Re-search at full depth
-                    score = -self.alpha_beta(&new_board, depth - 1, -beta, -alpha, ply + 1);
+                    // Re-search at full depth with endgame extension
+                    score = -self.alpha_beta(&new_board, depth - 1 + endgame_ext, -beta, -alpha, ply + 1);
                 } else {
                     score = reduced;
                 }
             } else if i > 0 {
                 // PVS: search with null window first
-                let pv_score = -self.alpha_beta(&new_board, depth - 1, -alpha - 1, -alpha, ply + 1);
+                let pv_score = -self.alpha_beta(&new_board, depth - 1 + endgame_ext, -alpha - 1, -alpha, ply + 1);
                 if pv_score > alpha && pv_score < beta {
-                    score = -self.alpha_beta(&new_board, depth - 1, -beta, -alpha, ply + 1);
+                    score = -self.alpha_beta(&new_board, depth - 1 + endgame_ext, -beta, -alpha, ply + 1);
                 } else {
                     score = pv_score;
                 }
             } else {
-                score = -self.alpha_beta(&new_board, depth - 1, -beta, -alpha, ply + 1);
+                score = -self.alpha_beta(&new_board, depth - 1 + endgame_ext, -beta, -alpha, ply + 1);
             }
 
             if self.stopped {
@@ -498,5 +573,6 @@ impl Searcher {
         self.tt.clear();
         self.killer_moves = [[-1; 2]; MAX_DEPTH as usize];
         self.history = [[0; NUM_PITS]; 2];
+        self.game_history.clear();
     }
 }

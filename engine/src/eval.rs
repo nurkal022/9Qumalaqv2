@@ -16,6 +16,8 @@ const EMPTY_PIT_PENALTY: i32 = -5;
 const LARGE_PIT_BONUS: i32 = 1;
 const ENDGAME_MATERIAL_BOOST: i32 = -6;
 const CAPTURE_OPP_WEIGHT: i32 = 4;
+const STARVATION_WEIGHT: i32 = 15;      // quadratic bonus for starving opponent
+const STARVATION_FINISH: i32 = 200;     // extra bonus to finish off nearly-empty opponent
 
 /// Maximum possible eval (for mate scores)
 pub const EVAL_INF: i32 = 100_000;
@@ -153,6 +155,27 @@ pub fn evaluate(board: &Board) -> i32 {
                 }
             }
         }
+    }
+
+    // 9. Starvation pressure — keeping opponent's side empty is critical
+    //    When opponent has few stones, each stone less is exponentially more valuable
+    //    because at 0 stones the game ends (we win if ahead in kazan)
+    if opp_pit_stones <= 9 {
+        let pressure = 10 - opp_pit_stones;
+        score += pressure * pressure * STARVATION_WEIGHT;
+    }
+    if my_pit_stones <= 9 {
+        let pressure = 10 - my_pit_stones;
+        score -= pressure * pressure * STARVATION_WEIGHT;
+    }
+
+    // 10. Finishing bonus — when we're winning on material and opponent is nearly empty,
+    //     give a huge bonus to push for the kill instead of giving stones back
+    if material_diff > 5 && opp_pit_stones <= 3 {
+        score += (4 - opp_pit_stones) * STARVATION_FINISH;
+    }
+    if material_diff < -5 && my_pit_stones <= 3 {
+        score -= (4 - my_pit_stones) * STARVATION_FINISH;
     }
 
     score
