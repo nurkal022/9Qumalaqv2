@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="kk">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Тоғызқұмалақ AI</title>
+<title>Тоғызқұмалақ AI — Championship Engine</title>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 :root {
@@ -19,92 +19,211 @@
     --text-light: #F5E6C8;
     --text-dark: #3E2723;
     --accent-gold: #FFD54F;
-    --accent-red: #EF5350;
+    --accent-green: #66BB6A;
     --tuzdyk-bg: #8B3A3A;
+    --panel-bg: rgba(62,39,35,0.95);
+    --panel-border: #5D4037;
 }
 body {
     font-family: 'Segoe UI', sans-serif;
     background: linear-gradient(135deg, #1a0f0a 0%, #2d1f15 50%, #1a0f0a 100%);
     min-height: 100vh;
+    color: var(--text-light);
+}
+
+/* === LOBBY === */
+.lobby {
     display: flex;
     flex-direction: column;
     align-items: center;
-    color: var(--text-light);
+    justify-content: center;
+    min-height: 100vh;
+    padding: 20px;
 }
-h1 {
-    margin: 18px 0 4px;
-    font-size: 26px;
+.lobby.hidden { display: none; }
+.lobby-title {
+    font-size: 36px;
+    color: var(--accent-gold);
+    text-shadow: 0 3px 12px rgba(0,0,0,0.6);
+    margin-bottom: 4px;
+}
+.lobby-sub {
+    color: #8D6E63;
+    font-size: 13px;
+    margin-bottom: 32px;
+}
+.lobby-card {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 16px;
+    padding: 32px 40px;
+    width: 400px;
+    max-width: 95vw;
+}
+.lobby-section {
+    margin-bottom: 22px;
+}
+.lobby-section:last-child { margin-bottom: 0; }
+.lobby-label {
+    font-size: 13px;
+    color: #8D6E63;
+    margin-bottom: 8px;
+    font-weight: bold;
+}
+.lobby-options {
+    display: flex;
+    gap: 8px;
+}
+.lobby-opt {
+    flex: 1;
+    padding: 10px 8px;
+    border: 2px solid var(--panel-border);
+    border-radius: 10px;
+    background: rgba(93,64,55,0.3);
+    color: var(--text-light);
+    font-size: 13px;
+    font-weight: bold;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.lobby-opt:hover { border-color: #8D6E63; background: rgba(93,64,55,0.5); }
+.lobby-opt.selected {
+    border-color: var(--accent-gold);
+    background: rgba(255,213,79,0.15);
+    color: var(--accent-gold);
+}
+.lobby-opt .opt-sub {
+    font-size: 10px;
+    color: #8D6E63;
+    font-weight: normal;
+    margin-top: 2px;
+}
+.lobby-opt.selected .opt-sub { color: var(--accent-gold); opacity: 0.7; }
+.lobby-start {
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: 12px;
+    background: linear-gradient(135deg, var(--accent-gold), #FFC107);
+    color: var(--text-dark);
+    font-size: 16px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-top: 8px;
+}
+.lobby-start:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(255,213,79,0.3); }
+
+/* === GAME SCREEN === */
+.game-screen { display: none; }
+.game-screen.active { display: block; }
+
+.header {
+    text-align: center;
+    padding: 10px 0 6px;
+}
+.header h1 {
+    font-size: 22px;
     color: var(--accent-gold);
     text-shadow: 0 2px 8px rgba(0,0,0,0.5);
 }
-.subtitle { color: #A1887F; font-size: 13px; margin-bottom: 12px; }
-.game-info {
+
+/* === MAIN LAYOUT === */
+.main-layout {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    padding: 0 20px;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.board-area {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex-shrink: 0;
+}
+
+/* Player bars */
+.player-bar {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    width: 780px;
-    margin-bottom: 8px;
-    padding: 8px 20px;
-    background: rgba(93,64,55,0.5);
-    border-radius: 12px;
+    width: 700px;
+    padding: 6px 16px;
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    margin-bottom: 6px;
 }
-.player-info { display: flex; align-items: center; gap: 10px; }
-.player-name { font-weight: bold; font-size: 15px; }
-.player-score {
+.player-bar.bottom { margin-top: 6px; margin-bottom: 0; }
+.player-bar .name { font-weight: bold; font-size: 14px; }
+.player-bar .score-box {
     background: var(--accent-gold);
     color: var(--text-dark);
     font-weight: bold;
-    font-size: 17px;
-    padding: 3px 12px;
+    font-size: 18px;
+    padding: 2px 14px;
     border-radius: 8px;
-    min-width: 38px;
+    min-width: 40px;
     text-align: center;
 }
-.turn-indicator {
+.player-bar .turn-badge {
     background: rgba(255,213,79,0.2);
-    border: 2px solid var(--accent-gold);
-    padding: 5px 14px;
-    border-radius: 20px;
-    font-size: 13px;
+    border: 1px solid var(--accent-gold);
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 11px;
     font-weight: bold;
+    color: var(--accent-gold);
 }
+.player-bar .turn-badge.hidden { visibility: hidden; }
 
 /* Board */
 .board {
     background: linear-gradient(160deg, #C49A3C 0%, var(--board-bg) 40%, #A07608 100%);
     border: 6px solid var(--board-border);
     border-radius: 16px;
-    padding: 14px 18px;
+    padding: 12px 16px;
     box-shadow: 0 8px 32px rgba(0,0,0,0.6), inset 0 1px 3px rgba(255,255,255,0.15);
+    position: relative;
 }
+.board.viewing-history {
+    border-color: #FF9800;
+    box-shadow: 0 0 20px rgba(255,152,0,0.4), 0 8px 32px rgba(0,0,0,0.6);
+}
+.history-banner {
+    display: none;
+    position: absolute;
+    top: -1px; left: 50%;
+    transform: translateX(-50%);
+    background: #FF9800;
+    color: #fff;
+    font-size: 11px;
+    font-weight: bold;
+    padding: 2px 14px;
+    border-radius: 0 0 8px 8px;
+    z-index: 10;
+}
+.board.viewing-history .history-banner { display: block; }
 
-/* Pit rows */
-.pits-row {
-    display: flex;
-    gap: 4px;
-    justify-content: center;
-}
-
-/* Labels row */
-.labels-row {
-    display: flex;
-    gap: 4px;
-    justify-content: center;
-}
+.pits-row { display: flex; gap: 4px; justify-content: center; }
+.labels-row { display: flex; gap: 4px; justify-content: center; }
 .pit-label {
-    width: 74px;
+    width: 68px;
     text-align: center;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: bold;
     color: var(--text-light);
     text-shadow: 0 1px 2px rgba(0,0,0,0.5);
     padding: 2px 0;
 }
 
-/* Individual pit */
 .pit {
-    width: 74px;
-    height: 160px;
+    width: 68px;
+    height: 150px;
     background: linear-gradient(180deg, var(--pit-inner) 0%, var(--pit-bg) 50%, var(--pit-inner) 100%);
     border: 2px solid var(--pit-border);
     border-radius: 10px;
@@ -141,20 +260,15 @@ h1 {
     background: linear-gradient(180deg, #6B2020 0%, var(--tuzdyk-bg) 50%, #6B2020 100%);
     border-color: #AA4444;
 }
-
 .tuzdyk-marker {
     position: absolute;
-    top: 3px;
-    left: 0;
-    right: 0;
+    top: 3px; left: 0; right: 0;
     text-align: center;
     font-size: 9px;
     color: #FF8A80;
     font-weight: bold;
     letter-spacing: 1px;
 }
-
-/* Stones container - 2-column grid, fills from bottom */
 .stones-col {
     display: flex;
     flex-wrap: wrap-reverse;
@@ -164,128 +278,191 @@ h1 {
     width: 100%;
     flex: 1;
     padding: 4px 4px 0 4px;
-    direction: ltr;
 }
-
-/* Individual stone - blue sphere */
 .stone {
     border-radius: 50%;
     background: radial-gradient(circle at 38% 32%, var(--stone-highlight), var(--stone-blue) 55%, var(--stone-shadow));
     box-shadow: 0 2px 3px rgba(0,0,0,0.4), inset 0 -1px 2px rgba(0,0,0,0.2);
     flex-shrink: 0;
 }
-
-/* Stone count number */
 .stone-count {
-    font-size: 14px;
+    font-size: 13px;
     font-weight: bold;
     color: var(--text-light);
     text-shadow: 0 1px 3px rgba(0,0,0,0.8);
     margin-bottom: 2px;
     flex-shrink: 0;
 }
-
-/* Kazans - stacked vertically */
 .kazans-col {
     display: flex;
     flex-direction: column;
-    align-items: center;
     gap: 4px;
-    margin: 6px 0;
+    margin: 5px 0;
 }
 .kazan {
     width: 100%;
-    min-height: 48px;
+    min-height: 44px;
     background: linear-gradient(180deg, var(--pit-inner) 0%, var(--kazan-bg) 50%, var(--pit-inner) 100%);
     border: 2px solid var(--pit-border);
     border-radius: 12px;
     display: flex;
     align-items: center;
-    padding: 4px 10px;
+    padding: 3px 10px;
     gap: 8px;
     box-shadow: inset 0 3px 8px rgba(0,0,0,0.4);
 }
-.kazan-info {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    min-width: 70px;
-    flex-shrink: 0;
-}
-.kazan-score {
-    font-size: 22px;
-    font-weight: bold;
-    color: var(--accent-gold);
-}
-.kazan-label {
-    font-size: 11px;
-    color: var(--text-light);
-    opacity: 0.8;
-}
-.kazan-stones {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 2px;
-    align-items: center;
-    justify-content: flex-start;
-    flex: 1;
-    padding: 2px 0;
-}
+.kazan-info { display: flex; flex-direction: column; align-items: center; min-width: 60px; flex-shrink: 0; }
+.kazan-score { font-size: 20px; font-weight: bold; color: var(--accent-gold); }
+.kazan-label { font-size: 10px; color: var(--text-light); opacity: 0.7; }
+.kazan-stones { display: flex; flex-wrap: wrap; gap: 2px; flex: 1; padding: 2px 0; }
 
-/* Controls & Settings */
-.settings {
+/* Controls under board */
+.board-controls {
+    display: flex;
+    gap: 8px;
     margin-top: 10px;
-    display: flex;
-    gap: 15px;
-    justify-content: center;
     align-items: center;
-}
-.settings label { font-size: 13px; color: #A1887F; }
-.settings select {
-    padding: 5px 10px;
-    border-radius: 6px;
-    border: 1px solid #8D6E63;
-    background: #5D4037;
-    color: var(--text-light);
-    font-size: 13px;
-}
-.controls {
-    display: flex;
-    gap: 10px;
-    margin-top: 12px;
+    justify-content: center;
 }
 .btn {
-    padding: 9px 22px;
+    padding: 7px 18px;
     border: none;
-    border-radius: 10px;
-    font-size: 14px;
+    border-radius: 8px;
+    font-size: 13px;
     font-weight: bold;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: all 0.15s;
 }
-.btn-primary {
-    background: linear-gradient(135deg, var(--accent-gold), #FFC107);
-    color: var(--text-dark);
-}
-.btn-secondary {
-    background: linear-gradient(135deg, #8D6E63, #5D4037);
-    color: var(--text-light);
-}
-.btn:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
-.status {
-    margin-top: 8px;
-    font-size: 14px;
-    color: #A1887F;
-    min-height: 20px;
-}
-.thinking { color: var(--accent-gold); animation: pulse 1s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
-.engine-info {
+.btn:hover { transform: translateY(-1px); box-shadow: 0 3px 10px rgba(0,0,0,0.3); }
+.btn-gold { background: linear-gradient(135deg, var(--accent-gold), #FFC107); color: var(--text-dark); }
+.btn-dark { background: linear-gradient(135deg, #8D6E63, #5D4037); color: var(--text-light); }
+.btn-orange { background: linear-gradient(135deg, #FF9800, #F57C00); color: #fff; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+
+.status-line {
     margin-top: 6px;
-    font-size: 12px;
-    color: #A1887F;
-    opacity: 0.7;
+    font-size: 13px;
+    color: #8D6E63;
+    min-height: 18px;
+    text-align: center;
 }
+.status-line.thinking { color: var(--accent-gold); animation: pulse 1s infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+/* === RIGHT PANEL === */
+.side-panel {
+    width: 280px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+}
+.panel-card {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: rgba(93,64,55,0.5);
+    font-weight: bold;
+    font-size: 13px;
+    color: var(--accent-gold);
+    cursor: default;
+    user-select: none;
+}
+.panel-body { padding: 8px 12px; }
+
+/* Mode tabs */
+.mode-tabs {
+    display: flex;
+    border-bottom: 1px solid var(--panel-border);
+}
+.mode-tab {
+    flex: 1;
+    padding: 8px;
+    text-align: center;
+    font-size: 12px;
+    font-weight: bold;
+    cursor: pointer;
+    color: #8D6E63;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s;
+}
+.mode-tab:hover { color: var(--text-light); }
+.mode-tab.active {
+    color: var(--accent-gold);
+    border-bottom-color: var(--accent-gold);
+    background: rgba(255,213,79,0.08);
+}
+
+/* Move history */
+.move-list-container {
+    max-height: 320px;
+    overflow-y: auto;
+    padding: 8px 12px;
+}
+.move-list-container::-webkit-scrollbar { width: 5px; }
+.move-list-container::-webkit-scrollbar-thumb { background: #5D4037; border-radius: 3px; }
+.move-row {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 0;
+    font-family: 'Consolas','Monaco','Courier New',monospace;
+    font-size: 13px;
+}
+.move-num { color: #6D4C41; min-width: 26px; text-align: right; margin-right: 4px; }
+.move-cell {
+    padding: 2px 8px;
+    border-radius: 4px;
+    min-width: 32px;
+    text-align: center;
+}
+.move-cell.white-move { color: var(--text-light); }
+.move-cell.black-move { color: #BCAAA4; }
+.move-cell.book-move { color: var(--accent-green); }
+.move-cell.clickable { cursor: pointer; }
+.move-cell.clickable:hover { background: rgba(255,213,79,0.15); }
+.move-cell.selected { background: rgba(255,152,0,0.3); border: 1px solid #FF9800; }
+.move-empty { min-width: 32px; }
+.return-btn-wrap {
+    padding: 6px 12px;
+    display: none;
+}
+.return-btn-wrap.visible { display: block; }
+
+/* Analysis panel */
+.analysis-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 10px;
+    font-size: 12px;
+}
+.analysis-grid .lbl { color: #8D6E63; }
+.analysis-grid .val { color: var(--text-light); font-weight: bold; font-family: 'Consolas',monospace; }
+.book-badge {
+    display: inline-block;
+    background: rgba(102,187,106,0.2);
+    color: var(--accent-green);
+    border: 1px solid var(--accent-green);
+    padding: 0 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: bold;
+}
+.detail-section {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px solid rgba(93,64,55,0.5);
+}
+.detail-section.collapsed { display: none; }
 
 /* Modal */
 .modal-overlay {
@@ -301,543 +478,692 @@ h1 {
 .modal {
     background: linear-gradient(145deg, #5D4037, #3E2723);
     border-radius: 20px;
-    padding: 40px;
+    padding: 36px;
     text-align: center;
     box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     animation: modalPop 0.3s ease;
 }
-@keyframes modalPop { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
-.modal h2 { font-size: 28px; color: var(--accent-gold); margin-bottom: 10px; }
-.modal p { font-size: 18px; margin-bottom: 20px; }
+@keyframes modalPop { from{transform:scale(0.8);opacity:0} to{transform:scale(1);opacity:1} }
+.modal h2 { font-size: 26px; color: var(--accent-gold); margin-bottom: 8px; }
+.modal p { font-size: 16px; margin-bottom: 18px; }
 </style>
 </head>
 <body>
-<h1>Тоғызқұмалақ AI</h1>
-<div class="subtitle">NNUE движок v0.1 &mdash; Rust + нейросеть</div>
 
-<div class="game-info">
-    <div class="player-info">
-        <span class="player-name" id="white-name">Игрок (Ақ)</span>
-        <span class="player-score" id="white-score">0</span>
-    </div>
-    <div class="turn-indicator" id="turn">Ход Ақ</div>
-    <div class="player-info">
-        <span class="player-score" id="black-score">0</span>
-        <span class="player-name" id="black-name">Движок (Қара)</span>
-    </div>
-</div>
+<!-- ========== LOBBY ========== -->
+<div class="lobby" id="lobby">
+    <div class="lobby-title">Тоғызқұмалақ AI</div>
+    <div class="lobby-sub">Championship Engine v1.0</div>
 
-<div class="board" id="board">
-    <!-- Black labels (top) -->
-    <div class="labels-row" id="black-labels"></div>
-    <!-- Black pits (top row) -->
-    <div class="pits-row" id="black-row"></div>
-    <!-- Kazans stacked vertically -->
-    <div class="kazans-col">
-        <div class="kazan" id="kazan-white">
-            <div class="kazan-info">
-                <span class="kazan-score" id="kazan-w-score">0</span>
-                <span class="kazan-label">Ақ қазан</span>
+    <div class="lobby-card">
+        <div class="lobby-section">
+            <div class="lobby-label">Тарап</div>
+            <div class="lobby-options" id="side-options">
+                <div class="lobby-opt selected" data-value="0" onclick="selectOption('side-options',this)">
+                    Ақ
+                    <div class="opt-sub">бірінші жүреді</div>
+                </div>
+                <div class="lobby-opt" data-value="1" onclick="selectOption('side-options',this)">
+                    Қара
+                    <div class="opt-sub">екінші жүреді</div>
+                </div>
             </div>
-            <div class="kazan-stones" id="kazan-w-stones"></div>
         </div>
-        <div class="kazan" id="kazan-black">
-            <div class="kazan-info">
-                <span class="kazan-score" id="kazan-b-score">0</span>
-                <span class="kazan-label">Қара қазан</span>
+
+        <div class="lobby-section">
+            <div class="lobby-label">Қозғалтқыш уақыты</div>
+            <div class="lobby-options" id="time-options">
+                <div class="lobby-opt" data-value="1000" onclick="selectOption('time-options',this)">1с</div>
+                <div class="lobby-opt selected" data-value="3000" onclick="selectOption('time-options',this)">3с</div>
+                <div class="lobby-opt" data-value="5000" onclick="selectOption('time-options',this)">5с</div>
+                <div class="lobby-opt" data-value="10000" onclick="selectOption('time-options',this)">10с</div>
             </div>
-            <div class="kazan-stones" id="kazan-b-stones"></div>
+        </div>
+
+        <div class="lobby-section">
+            <div class="lobby-label">Режім</div>
+            <div class="lobby-options" id="mode-options">
+                <div class="lobby-opt selected" data-value="game" onclick="selectOption('mode-options',this)">
+                    Ойын
+                    <div class="opt-sub">таза ойын</div>
+                </div>
+                <div class="lobby-opt" data-value="analysis" onclick="selectOption('mode-options',this)">
+                    Талдау
+                    <div class="opt-sub">жүрістерді талдау</div>
+                </div>
+            </div>
+        </div>
+
+        <button class="lobby-start" onclick="startGame()">Бастау</button>
+    </div>
+</div>
+
+<!-- ========== GAME SCREEN ========== -->
+<div class="game-screen" id="game-screen">
+
+<div class="header">
+    <h1>Тоғызқұмалақ AI</h1>
+</div>
+
+<div class="main-layout">
+    <div class="board-area">
+        <div class="player-bar" id="bar-top">
+            <div><span class="name" id="top-name">Қозғалтқыш (Қара)</span></div>
+            <span class="turn-badge hidden" id="top-turn">Кезек</span>
+            <span class="score-box" id="top-score">0</span>
+        </div>
+
+        <div class="board" id="board">
+            <div class="history-banner">Тарихтағы позиция</div>
+            <div class="labels-row" id="black-labels"></div>
+            <div class="pits-row" id="black-row"></div>
+            <div class="kazans-col">
+                <div class="kazan" id="kazan-white">
+                    <div class="kazan-info">
+                        <span class="kazan-score" id="kazan-w-score">0</span>
+                        <span class="kazan-label">Ақ қазан</span>
+                    </div>
+                    <div class="kazan-stones" id="kazan-w-stones"></div>
+                </div>
+                <div class="kazan" id="kazan-black">
+                    <div class="kazan-info">
+                        <span class="kazan-score" id="kazan-b-score">0</span>
+                        <span class="kazan-label">Қара қазан</span>
+                    </div>
+                    <div class="kazan-stones" id="kazan-b-stones"></div>
+                </div>
+            </div>
+            <div class="pits-row" id="white-row"></div>
+            <div class="labels-row" id="white-labels"></div>
+        </div>
+
+        <div class="player-bar bottom" id="bar-bottom">
+            <div><span class="name" id="bottom-name">Сіз (Ақ)</span></div>
+            <span class="turn-badge" id="bottom-turn">Кезек</span>
+            <span class="score-box" id="bottom-score">0</span>
+        </div>
+
+        <div class="board-controls">
+            <button class="btn btn-gold" onclick="goToLobby()">Жаңа ойын</button>
+            <button class="btn btn-dark" onclick="undoMove()">Артқа</button>
+        </div>
+        <div class="status-line" id="status"></div>
+    </div>
+
+    <!-- RIGHT: Side Panel -->
+    <div class="side-panel">
+        <!-- Mode tabs + Move history -->
+        <div class="panel-card">
+            <div class="mode-tabs">
+                <button class="mode-tab active" id="tab-game" onclick="setMode('game')">Ойын</button>
+                <button class="mode-tab" id="tab-analysis" onclick="setMode('analysis')">Талдау</button>
+            </div>
+            <div class="move-list-container" id="move-list-container">
+                <div id="move-list"></div>
+            </div>
+            <div class="return-btn-wrap" id="return-btn-wrap">
+                <button class="btn btn-orange btn-sm" style="width:100%" onclick="returnToLive()">Ағымдағы позицияға қайту</button>
+            </div>
+        </div>
+
+        <!-- Engine Analysis -->
+        <div class="panel-card">
+            <div class="panel-header"><span>Қозғалтқыш талдауы</span></div>
+            <div class="panel-body">
+                <div class="analysis-grid">
+                    <span class="lbl">Жүріс:</span>
+                    <span class="val" id="a-move">—</span>
+                    <span class="lbl">Баға:</span>
+                    <span class="val" id="a-score">—</span>
+                    <span class="lbl">Тереңдік:</span>
+                    <span class="val" id="a-depth">—</span>
+                </div>
+                <div class="detail-section collapsed" id="detail-section">
+                    <div class="analysis-grid">
+                        <span class="lbl">Түйіндер:</span>
+                        <span class="val" id="a-nodes">—</span>
+                        <span class="lbl">Жылдамдық:</span>
+                        <span class="val" id="a-nps">—</span>
+                        <span class="lbl">Уақыт:</span>
+                        <span class="val" id="a-time">—</span>
+                    </div>
+                </div>
+                <div style="text-align:right;margin-top:4px">
+                    <button id="detail-toggle" onclick="toggleDetails()" style="cursor:pointer;font-size:11px;color:#8D6E63;border:1px solid #5D4037;background:none;padding:1px 8px;border-radius:4px">Толық ақпарат ▼</button>
+                </div>
+            </div>
         </div>
     </div>
-    <!-- White pits (bottom row) -->
-    <div class="pits-row" id="white-row"></div>
-    <!-- White labels (bottom) -->
-    <div class="labels-row" id="white-labels"></div>
+</div>
 </div>
 
-<div class="settings">
-    <label>Сіз ойнайсыз:
-        <select id="player-side">
-            <option value="0">Ақ (бірінші)</option>
-            <option value="1">Қара (екінші)</option>
-        </select>
-    </label>
-    <label>Уақыт:
-        <select id="engine-time">
-            <option value="1000">1 сек</option>
-            <option value="3000" selected>3 сек</option>
-            <option value="5000">5 сек</option>
-            <option value="10000">10 сек</option>
-        </select>
-    </label>
-</div>
-
-<div class="controls">
-    <button class="btn btn-primary" onclick="newGame()">Жаңа ойын</button>
-    <button class="btn btn-secondary" onclick="undoMove()">Артқа</button>
-</div>
-
-<div class="status" id="status"></div>
-<div class="engine-info" id="engine-info"></div>
-
+<!-- Modal -->
 <div class="modal-overlay" id="modal">
     <div class="modal">
-        <h2 id="modal-title">Ойын аяқталды</h2>
+        <h2 id="modal-title"></h2>
         <p id="modal-text"></p>
-        <button class="btn btn-primary" onclick="closeModal(); newGame();">Қайтадан ойнау</button>
+        <button class="btn btn-gold" onclick="closeModal(); goToLobby();">Жаңа ойын</button>
     </div>
 </div>
 
 <script>
-const WHITE_LABELS = ['1','2','3','4','5','6','7','8','9'];
-const BLACK_LABELS = ['9','8','7','6','5','4','3','2','1'];
-
-let board = {
-    pits: [[9,9,9,9,9,9,9,9,9],[9,9,9,9,9,9,9,9,9]],
-    kazan: [0, 0],
-    tuzdyk: [-1, -1],
-    side_to_move: 0
-};
+// ===== STATE =====
+let board = null;
 let moveHistory = [];
+let gameStates = [];
+let moveNotation = [];
 let humanSide = 0;
+let engineTimeMs = 3000;
 let engineThinking = false;
 let gameOver = false;
-let lastMove = null; // {side, pit, landSide, landPit} for highlighting
+let lastMove = null;
 let animating = false;
+let currentMode = 'game';
+let viewIndex = -1;
+let detailsOpen = false;
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
-
-function getPitElement(side, pit) {
-    return document.querySelector(`.pit[data-side="${side}"][data-pit="${pit}"]`);
-}
-
-async function animateMove(pit) {
-    const me = board.side_to_move;
-    const opp = 1 - me;
-    let stones = board.pits[me][pit];
-    if (stones === 0) return;
-
-    animating = true;
-    const delay = stones > 20 ? 60 : stones > 10 ? 100 : 150;
-
-    // Work on animation copy
-    let anim = JSON.parse(JSON.stringify(board));
-
-    // Pick up stones
-    let sowCount;
-    if (stones === 1) {
-        anim.pits[me][pit] = 0;
-        sowCount = 1;
-    } else {
-        anim.pits[me][pit] = 1;
-        sowCount = stones - 1;
-    }
-
-    // Show source picked up
-    lastMove = {side: me, pit: pit, landSide: -1, landPit: -1};
-    const realBoard = board;
-    board = anim;
-    render();
-    await sleep(delay + 50);
-
-    // Distribute one by one
-    let curSide = me;
-    let curPit = pit;
-
-    for (let s = 0; s < sowCount; s++) {
-        curPit++;
-        if (curPit >= 9) { curPit = 0; curSide = 1 - curSide; }
-
-        anim.pits[curSide][curPit] += 1;
-        lastMove = {side: me, pit: pit, landSide: curSide, landPit: curPit};
-        board = anim;
-        render();
-
-        // Blue highlight on just-sowed pit
-        const el = getPitElement(curSide, curPit);
-        if (el) el.classList.add('sowing-active');
-
-        await sleep(delay);
-    }
-
-    // Restore real board
-    board = realBoard;
-    animating = false;
-}
-
-function newGame() {
-    humanSide = parseInt(document.getElementById('player-side').value);
-    board = {
+function initialBoard() {
+    return {
         pits: [[9,9,9,9,9,9,9,9,9],[9,9,9,9,9,9,9,9,9]],
         kazan: [0, 0],
         tuzdyk: [-1, -1],
         side_to_move: 0
     };
-    moveHistory = [];
-    engineThinking = false;
-    gameOver = false;
-    lastMove = null;
-    document.getElementById('white-name').textContent = humanSide === 0 ? 'Сіз (Ақ)' : 'Движок (Ақ)';
-    document.getElementById('black-name').textContent = humanSide === 1 ? 'Сіз (Қара)' : 'Движок (Қара)';
-    setStatus('');
-    document.getElementById('engine-info').textContent = '';
-    closeModal();
-    render();
-    if (board.side_to_move !== humanSide) {
-        engineMove();
-    }
 }
 
-// ---- Game Logic (client-side, mirrors Rust engine) ----
+function cloneBoard(b) { return JSON.parse(JSON.stringify(b)); }
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ===== LOBBY =====
+function selectOption(groupId, el) {
+    const group = document.getElementById(groupId);
+    group.querySelectorAll('.lobby-opt').forEach(o => o.classList.remove('selected'));
+    el.classList.add('selected');
+}
+
+function getSelectedValue(groupId) {
+    const sel = document.getElementById(groupId).querySelector('.lobby-opt.selected');
+    return sel ? sel.dataset.value : null;
+}
+
+function goToLobby() {
+    document.getElementById('game-screen').classList.remove('active');
+    document.getElementById('lobby').classList.remove('hidden');
+    closeModal();
+}
+
+function startGame() {
+    humanSide = parseInt(getSelectedValue('side-options'));
+    engineTimeMs = parseInt(getSelectedValue('time-options'));
+    currentMode = getSelectedValue('mode-options');
+
+    document.getElementById('lobby').classList.add('hidden');
+    document.getElementById('game-screen').classList.add('active');
+
+    // Set mode tabs
+    document.getElementById('tab-game').className = 'mode-tab' + (currentMode==='game' ? ' active' : '');
+    document.getElementById('tab-analysis').className = 'mode-tab' + (currentMode==='analysis' ? ' active' : '');
+
+    newGame();
+}
+
+// ===== FORMATTING =====
+function formatScore(s) {
+    if (Math.abs(s) > 80000) return s > 0 ? '+МАТ' : '-МАТ';
+    return (s > 0 ? '+' : '') + s;
+}
+function formatNodes(n) {
+    if (n >= 1e6) return (n/1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n/1e3).toFixed(0) + 'K';
+    return ''+n;
+}
+function formatNps(n) {
+    if (n >= 1e6) return (n/1e6).toFixed(1) + 'M/с';
+    if (n >= 1e3) return (n/1e3).toFixed(0) + 'K/с';
+    return n + '/с';
+}
+
+// ===== MODES =====
+function setMode(mode) {
+    currentMode = mode;
+    document.getElementById('tab-game').className = 'mode-tab' + (mode==='game' ? ' active' : '');
+    document.getElementById('tab-analysis').className = 'mode-tab' + (mode==='analysis' ? ' active' : '');
+    if (mode === 'game') returnToLive();
+    renderMoveList();
+}
+
+function toggleDetails() {
+    detailsOpen = !detailsOpen;
+    document.getElementById('detail-section').className = detailsOpen ? 'detail-section' : 'detail-section collapsed';
+    document.getElementById('detail-toggle').textContent = detailsOpen ? 'Жасыру ▲' : 'Толық ақпарат ▼';
+}
+
+// ===== ANALYSIS NAVIGATION =====
+function viewMove(idx) {
+    if (currentMode !== 'analysis') return;
+    if (idx < 0 || idx >= gameStates.length) return;
+    viewIndex = idx;
+    document.getElementById('return-btn-wrap').className = 'return-btn-wrap visible';
+    renderBoard(gameStates[idx]);
+    renderMoveList();
+    document.getElementById('board').classList.add('viewing-history');
+}
+
+function returnToLive() {
+    viewIndex = -1;
+    document.getElementById('return-btn-wrap').className = 'return-btn-wrap';
+    document.getElementById('board').classList.remove('viewing-history');
+    renderBoard(board);
+    renderMoveList();
+}
+
+function isViewingHistory() { return viewIndex >= 0; }
+
+// ===== GAME LOGIC =====
 function makeMove(state, pit) {
     const me = state.side_to_move;
     const opp = 1 - me;
     let stones = state.pits[me][pit];
     if (stones === 0) return null;
-
-    const snapshot = JSON.parse(JSON.stringify(state));
+    const snapshot = cloneBoard(state);
 
     let landSide, landPit;
     if (stones === 1) {
         state.pits[me][pit] = 0;
-        let nextPit = pit + 1;
-        let nextSide = me;
-        if (nextPit >= 9) { nextPit = 0; nextSide = opp; }
-        state.pits[nextSide][nextPit] += 1;
-        landSide = nextSide; landPit = nextPit;
-
-        if (nextSide === opp) {
-            if (state.pits[opp][nextPit] === 3 && nextPit !== 8 && state.tuzdyk[me] === -1 &&
-                state.tuzdyk[opp] !== nextPit) {
-                state.tuzdyk[me] = nextPit;
-                state.kazan[me] += state.pits[opp][nextPit];
-                state.pits[opp][nextPit] = 0;
-            } else if (state.pits[opp][nextPit] % 2 === 0 && state.pits[opp][nextPit] > 0) {
-                state.kazan[me] += state.pits[opp][nextPit];
-                state.pits[opp][nextPit] = 0;
+        let np = pit + 1, ns = me;
+        if (np >= 9) { np = 0; ns = opp; }
+        state.pits[ns][np] += 1;
+        landSide = ns; landPit = np;
+        if (ns === opp) {
+            if (state.pits[opp][np]===3 && np!==8 && state.tuzdyk[me]===-1 && state.tuzdyk[opp]!==np) {
+                state.tuzdyk[me] = np;
+                state.kazan[me] += state.pits[opp][np];
+                state.pits[opp][np] = 0;
+            } else if (state.pits[opp][np]%2===0 && state.pits[opp][np]>0) {
+                state.kazan[me] += state.pits[opp][np];
+                state.pits[opp][np] = 0;
             }
         }
     } else {
         state.pits[me][pit] = 1;
         stones -= 1;
-        let curSide = me;
-        let curPit = pit;
-
+        let cs = me, cp = pit;
         for (let s = 0; s < stones; s++) {
-            curPit++;
-            if (curPit >= 9) {
-                curPit = 0;
-                curSide = 1 - curSide;
-            }
-            state.pits[curSide][curPit] += 1;
+            cp++;
+            if (cp >= 9) { cp = 0; cs = 1-cs; }
+            state.pits[cs][cp] += 1;
         }
-        landSide = curSide; landPit = curPit;
-
-        if (curSide === opp) {
-            if (state.pits[opp][curPit] === 3 && curPit !== 8 && state.tuzdyk[me] === -1 &&
-                state.tuzdyk[opp] !== curPit) {
-                state.tuzdyk[me] = curPit;
-                state.kazan[me] += state.pits[opp][curPit];
-                state.pits[opp][curPit] = 0;
-            } else if (state.pits[opp][curPit] % 2 === 0 && state.pits[opp][curPit] > 0) {
-                state.kazan[me] += state.pits[opp][curPit];
-                state.pits[opp][curPit] = 0;
+        landSide = cs; landPit = cp;
+        if (cs === opp) {
+            if (state.pits[opp][cp]===3 && cp!==8 && state.tuzdyk[me]===-1 && state.tuzdyk[opp]!==cp) {
+                state.tuzdyk[me] = cp;
+                state.kazan[me] += state.pits[opp][cp];
+                state.pits[opp][cp] = 0;
+            } else if (state.pits[opp][cp]%2===0 && state.pits[opp][cp]>0) {
+                state.kazan[me] += state.pits[opp][cp];
+                state.pits[opp][cp] = 0;
             }
         }
     }
-    lastMove = {side: me, pit: pit, landSide: landSide, landPit: landPit};
-
-    for (let side = 0; side < 2; side++) {
-        if (state.tuzdyk[side] >= 0) {
-            const tuzPit = state.tuzdyk[side];
-            const oppSide = 1 - side;
-            if (state.pits[oppSide][tuzPit] > 0) {
-                state.kazan[side] += state.pits[oppSide][tuzPit];
-                state.pits[oppSide][tuzPit] = 0;
+    lastMove = {side:me, pit:pit, landSide:landSide, landPit:landPit};
+    for (let side=0; side<2; side++) {
+        if (state.tuzdyk[side]>=0) {
+            const tp = state.tuzdyk[side], os = 1-side;
+            if (state.pits[os][tp]>0) {
+                state.kazan[side] += state.pits[os][tp];
+                state.pits[os][tp] = 0;
             }
         }
     }
-
     state.side_to_move = opp;
     return snapshot;
 }
 
 function isValidMove(state, pit) {
-    const me = state.side_to_move;
-    const opp = 1 - me;
+    const me = state.side_to_move, opp = 1-me;
     return state.pits[me][pit] > 0 && state.tuzdyk[opp] !== pit;
 }
 
 function getGameResult(state) {
     if (state.kazan[0] >= 82) return 'white';
     if (state.kazan[1] >= 82) return 'black';
-    if (state.kazan[0] === 81 && state.kazan[1] === 81) return 'draw';
-
-    const me = state.side_to_move;
-    const opp = 1 - me;
-    let hasMoves = false;
-    for (let i = 0; i < 9; i++) {
-        if (state.pits[me][i] > 0 && state.tuzdyk[opp] !== i) {
-            hasMoves = true;
-            break;
-        }
-    }
-    if (!hasMoves) {
-        let remaining = 0;
-        for (let i = 0; i < 9; i++) remaining += state.pits[opp][i];
-        const totalMe = state.kazan[me];
-        const totalOpp = state.kazan[opp] + remaining;
-        if (totalMe > totalOpp) return me === 0 ? 'white' : 'black';
-        if (totalOpp > totalMe) return opp === 0 ? 'white' : 'black';
+    if (state.kazan[0]===81 && state.kazan[1]===81) return 'draw';
+    const me = state.side_to_move, opp = 1-me;
+    let has = false;
+    for (let i=0;i<9;i++) if (state.pits[me][i]>0 && state.tuzdyk[opp]!==i) { has=true; break; }
+    if (!has) {
+        let rem=0; for(let i=0;i<9;i++) rem+=state.pits[opp][i];
+        const tMe=state.kazan[me], tOpp=state.kazan[opp]+rem;
+        if(tMe>tOpp) return me===0?'white':'black';
+        if(tOpp>tMe) return opp===0?'white':'black';
         return 'draw';
     }
     return null;
 }
 
-// ---- Rendering ----
-function render() {
-    const whiteRow = document.getElementById('white-row');
-    const blackRow = document.getElementById('black-row');
-    const whiteLabels = document.getElementById('white-labels');
-    const blackLabels = document.getElementById('black-labels');
-    whiteRow.innerHTML = '';
-    blackRow.innerHTML = '';
-    whiteLabels.innerHTML = '';
-    blackLabels.innerHTML = '';
-
-    // Black pits (top, reversed)
-    for (let i = 8; i >= 0; i--) {
-        blackRow.appendChild(createPit(1, i));
-        const lbl = document.createElement('div');
-        lbl.className = 'pit-label';
-        lbl.textContent = BLACK_LABELS[8 - i];
-        blackLabels.appendChild(lbl);
-    }
-
-    // White pits (bottom, left to right)
-    for (let i = 0; i < 9; i++) {
-        whiteRow.appendChild(createPit(0, i));
-        const lbl = document.createElement('div');
-        lbl.className = 'pit-label';
-        lbl.textContent = WHITE_LABELS[i];
-        whiteLabels.appendChild(lbl);
-    }
-
-    document.getElementById('white-score').textContent = board.kazan[0];
-    document.getElementById('black-score').textContent = board.kazan[1];
-    document.getElementById('kazan-w-score').textContent = board.kazan[0];
-    document.getElementById('kazan-b-score').textContent = board.kazan[1];
-
-    renderKazanStones('kazan-w-stones', board.kazan[0]);
-    renderKazanStones('kazan-b-stones', board.kazan[1]);
-
-    const side = board.side_to_move === 0 ? 'Ақ' : 'Қара';
-    document.getElementById('turn').textContent = `Ход: ${side}`;
+// ===== ANIMATION =====
+function getPitElement(side, pit) {
+    return document.querySelector(`.pit[data-side="${side}"][data-pit="${pit}"]`);
 }
 
-function renderKazanStones(containerId, count) {
-    const container = document.getElementById(containerId);
-    container.innerHTML = '';
-    // Show stones: max ~40 visible, shrink if many
-    const maxVisible = Math.min(count, 50);
-    const size = count <= 20 ? 12 : count <= 40 ? 9 : 7;
-    for (let i = 0; i < maxVisible; i++) {
-        const s = document.createElement('div');
-        s.className = 'stone';
-        s.style.width = size + 'px';
-        s.style.height = size + 'px';
-        container.appendChild(s);
+async function animateMove(pit) {
+    const me = board.side_to_move, opp = 1-me;
+    let stones = board.pits[me][pit];
+    if (stones === 0) return;
+    animating = true;
+    const delay = stones > 20 ? 60 : stones > 10 ? 100 : 150;
+    let anim = cloneBoard(board);
+    let sowCount;
+    if (stones===1) { anim.pits[me][pit]=0; sowCount=1; }
+    else { anim.pits[me][pit]=1; sowCount=stones-1; }
+
+    lastMove = {side:me, pit:pit, landSide:-1, landPit:-1};
+    const realBoard = board;
+    board = anim;
+    renderBoard(board);
+    await sleep(delay+50);
+
+    let cs=me, cp=pit;
+    for (let s=0; s<sowCount; s++) {
+        cp++; if(cp>=9){cp=0;cs=1-cs;}
+        anim.pits[cs][cp]+=1;
+        lastMove={side:me,pit:pit,landSide:cs,landPit:cp};
+        board=anim;
+        renderBoard(board);
+        const el=getPitElement(cs,cp);
+        if(el) el.classList.add('sowing-active');
+        await sleep(delay);
     }
+    board=realBoard;
+    animating=false;
 }
 
-function createPit(side, idx) {
-    const div = document.createElement('div');
-    div.className = 'pit';
-    div.dataset.side = side;
-    div.dataset.pit = idx;
-    const stones = board.pits[side][idx];
+// ===== RENDERING =====
+function renderBoard(b) {
+    const whiteRow=document.getElementById('white-row');
+    const blackRow=document.getElementById('black-row');
+    const wLabels=document.getElementById('white-labels');
+    const bLabels=document.getElementById('black-labels');
+    whiteRow.innerHTML=''; blackRow.innerHTML=''; wLabels.innerHTML=''; bLabels.innerHTML='';
 
-    // Last move highlighting
-    if (lastMove) {
-        if (lastMove.side === side && lastMove.pit === idx) div.classList.add('move-source');
-        if (lastMove.landSide === side && lastMove.landPit === idx) div.classList.add('move-land');
+    const isLive = !isViewingHistory();
+
+    for(let i=8;i>=0;i--){
+        blackRow.appendChild(createPit(1,i,b,isLive));
+        const l=document.createElement('div'); l.className='pit-label'; l.textContent=9-i; bLabels.appendChild(l);
+    }
+    for(let i=0;i<9;i++){
+        whiteRow.appendChild(createPit(0,i,b,isLive));
+        const l=document.createElement('div'); l.className='pit-label'; l.textContent=i+1; wLabels.appendChild(l);
     }
 
-    // Tuzdyk styling
-    const isOppTuzdyk = board.tuzdyk[1-side] === idx;
-    if (isOppTuzdyk) {
-        div.classList.add('tuzdyk');
-        const marker = document.createElement('span');
-        marker.className = 'tuzdyk-marker';
-        marker.textContent = 'ТҰЗ';
-        div.appendChild(marker);
-    }
-
-    // Clickable
-    const isHumanSide = side === humanSide;
-    const isHumanTurn = board.side_to_move === humanSide;
-    if (isHumanSide && isHumanTurn && !engineThinking && !animating && !gameOver && isValidMove(board, idx)) {
-        div.classList.add('clickable');
-        div.onclick = () => humanMove(idx);
-    }
-
-    // Stones container - 2-column grid with dynamic sizing
-    const stonesCol = document.createElement('div');
-    stonesCol.className = 'stones-col';
-
-    // 2 columns, available height ~130px
-    const availableHeight = 130;
-    const rows = Math.ceil(stones / 2);
-    let stoneSize, displayCount;
-
-    if (stones === 0) {
-        displayCount = 0;
-        stoneSize = 16;
-    } else if (rows <= 6) {
-        // Fits nicely: up to 12 stones (6 rows x 2)
-        stoneSize = Math.min(20, Math.floor(availableHeight / rows) - 3);
-        stoneSize = Math.max(stoneSize, 10);
-        displayCount = stones;
-    } else if (rows <= 10) {
-        // Medium: up to 20 stones
-        stoneSize = Math.floor(availableHeight / rows) - 2;
-        stoneSize = Math.max(stoneSize, 8);
-        displayCount = stones;
+    if (humanSide === 0) {
+        document.getElementById('bottom-score').textContent = b.kazan[0];
+        document.getElementById('top-score').textContent = b.kazan[1];
     } else {
-        // Many stones: small, show as many as fit
-        stoneSize = 8;
-        const maxRows = Math.floor(availableHeight / (stoneSize + 2));
-        displayCount = Math.min(stones, maxRows * 2);
+        document.getElementById('bottom-score').textContent = b.kazan[1];
+        document.getElementById('top-score').textContent = b.kazan[0];
+    }
+    document.getElementById('kazan-w-score').textContent = b.kazan[0];
+    document.getElementById('kazan-b-score').textContent = b.kazan[1];
+
+    renderKazanStones('kazan-w-stones', b.kazan[0]);
+    renderKazanStones('kazan-b-stones', b.kazan[1]);
+
+    const isWhiteTurn = b.side_to_move === 0;
+    if (humanSide === 0) {
+        document.getElementById('bottom-turn').className = 'turn-badge' + (isWhiteTurn ? '' : ' hidden');
+        document.getElementById('top-turn').className = 'turn-badge' + (!isWhiteTurn ? '' : ' hidden');
+    } else {
+        document.getElementById('bottom-turn').className = 'turn-badge' + (!isWhiteTurn ? '' : ' hidden');
+        document.getElementById('top-turn').className = 'turn-badge' + (isWhiteTurn ? '' : ' hidden');
+    }
+}
+
+function renderKazanStones(id, count) {
+    const c=document.getElementById(id); c.innerHTML='';
+    const max=Math.min(count,50);
+    const sz=count<=20?11:count<=40?8:6;
+    for(let i=0;i<max;i++){
+        const s=document.createElement('div'); s.className='stone';
+        s.style.width=sz+'px'; s.style.height=sz+'px'; c.appendChild(s);
+    }
+}
+
+function createPit(side, idx, b, isLive) {
+    const div=document.createElement('div');
+    div.className='pit'; div.dataset.side=side; div.dataset.pit=idx;
+    const stones=b.pits[side][idx];
+
+    if(lastMove && isLive){
+        if(lastMove.side===side && lastMove.pit===idx) div.classList.add('move-source');
+        if(lastMove.landSide===side && lastMove.landPit===idx) div.classList.add('move-land');
+    }
+    if(b.tuzdyk[1-side]===idx){
+        div.classList.add('tuzdyk');
+        const m=document.createElement('span'); m.className='tuzdyk-marker'; m.textContent='ТҰЗ'; div.appendChild(m);
+    }
+    if(isLive && side===humanSide && b.side_to_move===humanSide && !engineThinking && !animating && !gameOver && isValidMove(b,idx)){
+        div.classList.add('clickable');
+        div.onclick=()=>humanMove(idx);
     }
 
-    for (let s = 0; s < displayCount; s++) {
-        const stone = document.createElement('div');
-        stone.className = 'stone';
-        stone.style.width = stoneSize + 'px';
-        stone.style.height = stoneSize + 'px';
-        stonesCol.appendChild(stone);
+    const sc=document.createElement('div'); sc.className='stones-col';
+    const ah=120, rows=Math.ceil(stones/2);
+    let sz,dc;
+    if(stones===0){dc=0;sz=16;}
+    else if(rows<=6){sz=Math.max(10,Math.min(18,Math.floor(ah/rows)-3));dc=stones;}
+    else if(rows<=10){sz=Math.max(8,Math.floor(ah/rows)-2);dc=stones;}
+    else{sz=7;dc=Math.min(stones,Math.floor(ah/(sz+2))*2);}
+    for(let s=0;s<dc;s++){
+        const st=document.createElement('div'); st.className='stone';
+        st.style.width=sz+'px'; st.style.height=sz+'px'; sc.appendChild(st);
     }
-    div.appendChild(stonesCol);
-
-    // Count number
-    const countDiv = document.createElement('div');
-    countDiv.className = 'stone-count';
-    countDiv.textContent = stones;
-    div.appendChild(countDiv);
-
+    div.appendChild(sc);
+    const cn=document.createElement('div'); cn.className='stone-count'; cn.textContent=stones; div.appendChild(cn);
     return div;
 }
 
-// ---- Game Flow ----
-async function humanMove(pit) {
-    if (engineThinking || animating || gameOver) return;
-    if (!isValidMove(board, pit)) return;
+// ===== MOVE LIST =====
+function renderMoveList() {
+    const list=document.getElementById('move-list');
+    list.innerHTML='';
+    const isAnalysis = currentMode === 'analysis';
 
-    await animateMove(pit);
+    for(let i=0; i<moveNotation.length; i+=2) {
+        const row=document.createElement('div'); row.className='move-row';
 
-    const snapshot = makeMove(board, pit);
-    moveHistory.push(snapshot);
-    render();
+        const num=document.createElement('span'); num.className='move-num';
+        num.textContent=(Math.floor(i/2)+1)+'.'; row.appendChild(num);
 
-    const result = getGameResult(board);
-    if (result) {
-        showResult(result);
-        return;
+        const wm=moveNotation[i];
+        const wc=document.createElement('span');
+        let wcls='move-cell white-move';
+        if(wm.source==='book') wcls='move-cell book-move';
+        if(isAnalysis) wcls+=' clickable';
+        if(viewIndex===i) wcls+=' selected';
+        wc.className=wcls;
+        wc.textContent=wm.pit;
+        if(isAnalysis){const ci=i; wc.onclick=()=>viewMove(ci);}
+        row.appendChild(wc);
+
+        if(i+1<moveNotation.length){
+            const bm=moveNotation[i+1];
+            const bc=document.createElement('span');
+            let bcls='move-cell black-move';
+            if(bm.source==='book') bcls='move-cell book-move';
+            if(isAnalysis) bcls+=' clickable';
+            if(viewIndex===i+1) bcls+=' selected';
+            bc.className=bcls;
+            bc.textContent=bm.pit;
+            if(isAnalysis){const ci=i+1; bc.onclick=()=>viewMove(ci);}
+            row.appendChild(bc);
+        }
+
+        list.appendChild(row);
     }
+    const container=document.getElementById('move-list-container');
+    container.scrollTop=container.scrollHeight;
+}
+
+function updateAnalysis(data) {
+    if(data.book){
+        document.getElementById('a-move').innerHTML = data.bestmove+1 + ' <span class="book-badge">КІТАП</span>';
+        document.getElementById('a-score').textContent='—';
+        document.getElementById('a-depth').textContent='Кітапхана';
+        document.getElementById('a-nodes').textContent='—';
+        document.getElementById('a-nps').textContent='—';
+        document.getElementById('a-time').textContent='лезде';
+    } else {
+        document.getElementById('a-move').textContent='Отау '+(data.bestmove+1);
+        document.getElementById('a-score').textContent=formatScore(data.score);
+        document.getElementById('a-depth').textContent=data.depth;
+        document.getElementById('a-nodes').textContent=formatNodes(data.nodes);
+        document.getElementById('a-nps').textContent=formatNps(data.nps);
+        document.getElementById('a-time').textContent=data.time_ms+'мс';
+    }
+}
+
+// ===== GAME FLOW =====
+async function newGame() {
+    board = initialBoard();
+    moveHistory=[]; gameStates=[]; moveNotation=[];
+    engineThinking=false; gameOver=false; lastMove=null; viewIndex=-1;
+
+    if(humanSide===0){
+        document.getElementById('bottom-name').textContent='Сіз (Ақ)';
+        document.getElementById('top-name').textContent='Қозғалтқыш (Қара)';
+    } else {
+        document.getElementById('bottom-name').textContent='Сіз (Қара)';
+        document.getElementById('top-name').textContent='Қозғалтқыш (Ақ)';
+    }
+
+    setStatus('');
+    document.getElementById('a-move').textContent='—';
+    document.getElementById('a-score').textContent='—';
+    document.getElementById('a-depth').textContent='—';
+    document.getElementById('a-nodes').textContent='—';
+    document.getElementById('a-nps').textContent='—';
+    document.getElementById('a-time').textContent='—';
+    document.getElementById('board').classList.remove('viewing-history');
+    document.getElementById('return-btn-wrap').className='return-btn-wrap';
+    closeModal();
+    renderBoard(board);
+    renderMoveList();
+
+    try { await fetch('/api/newgame',{method:'POST'}); } catch(e){}
+
+    if(board.side_to_move !== humanSide) engineMove();
+}
+
+async function humanMove(pit) {
+    if(engineThinking || animating || gameOver || isViewingHistory()) return;
+    if(!isValidMove(board, pit)) return;
+
+    const side=board.side_to_move;
+    await animateMove(pit);
+    const snapshot=makeMove(board, pit);
+    moveHistory.push(snapshot);
+    gameStates.push(cloneBoard(board));
+    moveNotation.push({side:side, pit:pit+1, source:'human'});
+    renderBoard(board);
+    renderMoveList();
+
+    try {
+        await fetch('/api/position',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({board:board})
+        });
+    } catch(e){}
+
+    const result=getGameResult(board);
+    if(result){ showResult(result); return; }
     engineMove();
 }
 
 async function engineMove() {
-    if (gameOver) return;
-    engineThinking = true;
-    setStatus('Движок ойлайды...');
-    render();
-
-    const timeMs = parseInt(document.getElementById('engine-time').value);
+    if(gameOver) return;
+    engineThinking=true;
+    setStatus('Қозғалтқыш ойлануда...');
+    renderBoard(board);
 
     try {
-        const resp = await fetch('/api/move', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ board: board, time_ms: timeMs })
+        const resp=await fetch('/api/move',{
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({board:board, time_ms:engineTimeMs})
         });
-        const data = await resp.json();
+        const data=await resp.json();
 
-        if (data.error) {
-            setStatus('Қате: ' + data.error);
-            engineThinking = false;
-            render();
-            return;
+        if(data.error){ setStatus('Қате: '+data.error); engineThinking=false; renderBoard(board); return; }
+        if(data.terminal){
+            showResult(data.result==='white_win'?'white':data.result==='black_win'?'black':'draw');
+            engineThinking=false; return;
         }
 
-        if (data.terminal) {
-            showResult(data.result === 'white_win' ? 'white' : data.result === 'black_win' ? 'black' : 'draw');
-            engineThinking = false;
-            return;
-        }
-
-        const pit = data.bestmove;
-
-        engineThinking = false;
+        const pit=data.bestmove;
+        const side=board.side_to_move;
+        engineThinking=false;
         setStatus('');
         await animateMove(pit);
-
-        const snapshot = makeMove(board, pit);
+        const snapshot=makeMove(board, pit);
         moveHistory.push(snapshot);
+        gameStates.push(cloneBoard(board));
+        moveNotation.push({side:side, pit:pit+1, source:data.book?'book':'engine'});
 
-        document.getElementById('engine-info').textContent =
-            `Отау ${pit+1} | Баға: ${data.score} | Тереңдік: ${data.depth} | ${(data.nodes/1000).toFixed(0)}K түйін | ${data.time_ms} мс`;
+        updateAnalysis(data);
+        renderBoard(board);
+        renderMoveList();
 
-        setStatus('');
-        render();
-
-        const result = getGameResult(board);
-        if (result) {
-            showResult(result);
-        }
-    } catch (e) {
-        setStatus('Байланыс қатесі: ' + e.message);
-        engineThinking = false;
-        render();
+        const result=getGameResult(board);
+        if(result) showResult(result);
+    } catch(e){
+        setStatus('Байланыс қатесі: '+e.message);
+        engineThinking=false;
+        renderBoard(board);
     }
 }
 
 function undoMove() {
-    if (engineThinking || animating || moveHistory.length < 2) return;
-    moveHistory.pop();
-    board = JSON.parse(JSON.stringify(moveHistory.pop()));
-    gameOver = false;
+    if(engineThinking || animating || moveNotation.length<2) return;
+    if(isViewingHistory()) returnToLive();
+
+    moveNotation.pop(); moveNotation.pop();
+    moveHistory.pop(); moveHistory.pop();
+    gameStates.pop(); gameStates.pop();
+
+    board = initialBoard();
+    lastMove = null;
+    for(const mn of moveNotation) makeMove(board, mn.pit-1);
+
+    gameOver=false;
     closeModal();
     setStatus('');
-    document.getElementById('engine-info').textContent = '';
-    render();
+    renderBoard(board);
+    renderMoveList();
+    fetch('/api/newgame',{method:'POST'}).catch(()=>{});
 }
 
 function showResult(result) {
-    gameOver = true;
-    const modal = document.getElementById('modal');
-    const title = document.getElementById('modal-title');
-    const text = document.getElementById('modal-text');
-
-    if (result === 'draw') {
-        title.textContent = 'Тең!';
-        text.textContent = `${board.kazan[0]} – ${board.kazan[1]}`;
+    gameOver=true;
+    const title=document.getElementById('modal-title');
+    const text=document.getElementById('modal-text');
+    if(result==='draw'){
+        title.textContent='Тең!';
+        text.textContent=board.kazan[0]+' – '+board.kazan[1];
     } else {
-        const isHumanWin = (result === 'white' && humanSide === 0) || (result === 'black' && humanSide === 1);
-        title.textContent = isHumanWin ? 'Сіз жеңдіңіз!' : 'Движок жеңді!';
-        text.textContent = `Ақ ${board.kazan[0]} – ${board.kazan[1]} Қара`;
+        const hw=(result==='white'&&humanSide===0)||(result==='black'&&humanSide===1);
+        title.textContent=hw?'Сіз жеңдіңіз!':'Қозғалтқыш жеңді!';
+        text.textContent='Ақ '+board.kazan[0]+' – '+board.kazan[1]+' Қара';
     }
-    modal.classList.add('active');
+    document.getElementById('modal').classList.add('active');
 }
 
-function closeModal() { document.getElementById('modal').classList.remove('active'); }
-function setStatus(msg) {
-    const el = document.getElementById('status');
-    el.textContent = msg;
-    el.className = msg.includes('ойлайды') ? 'status thinking' : 'status';
+function closeModal(){ document.getElementById('modal').classList.remove('active'); }
+function setStatus(msg){
+    const el=document.getElementById('status');
+    el.textContent=msg;
+    el.className=msg.includes('ойлануда')?'status-line thinking':'status-line';
 }
-
-newGame();
 </script>
 </body>
 </html>

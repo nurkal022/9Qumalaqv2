@@ -22,6 +22,24 @@ engine/positions.txt
 report/
 report.zip
 
+# Training data binaries (too large for git)
+engine/*_training_data.bin
+engine/*_combined.bin
+engine/combined_hce_data.bin
+engine/endgame_synthetic.bin
+engine/test_training_data.bin
+engine/hce_mac_training_data.bin
+engine/master_training.bin
+engine/master_all_elo_training.bin
+engine/nnue_scaled_training_data.bin
+
+# Experiment weight snapshots (keep only production weights)
+engine/exp*.bin
+engine/nnue_v*.bin
+engine/nnue_weights_backup.bin
+engine/nnue_weights_disabled.bin
+engine/nnue_weights_v2.bin
+
 # Rust build artifacts
 engine/target/
 

@@ -52,7 +52,9 @@ fn main() {
                 let depth: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
                 let threads: u32 = args.get(4).and_then(|s| s.parse().ok())
                     .unwrap_or(std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4));
-                datagen::run_datagen(num_games, depth, 500, threads);
+                let prefix = args.get(5).map(|s| s.as_str()).unwrap_or("local");
+                let nnue = load_nnue();
+                datagen::run_datagen(num_games, depth, 500, threads, nnue, prefix);
             }
             "analyze" => {
                 // Format: analyze "w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side" [time_ms]
@@ -60,6 +62,7 @@ fn main() {
                 let time_ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3000);
                 run_analyze(pos, time_ms);
             }
+            "serve" => run_serve(),
             _ => print_usage(),
         }
     } else {
@@ -68,7 +71,7 @@ fn main() {
 }
 
 fn print_usage() {
-    println!("Togyzkumalaq Engine v0.1");
+    println!("Togyzkumalaq Championship Engine v1.0");
     println!();
     println!("Usage:");
     println!("  togyzkumalaq-engine play      - Play against the engine");
@@ -78,10 +81,11 @@ fn print_usage() {
     println!("  togyzkumalaq-engine texel      - Tune eval weights (Texel method)");
     println!("  togyzkumalaq-engine match [games] [time_ms]");
     println!("                                 - NNUE vs Handcrafted eval match");
-    println!("  togyzkumalaq-engine datagen [games] [depth] [threads]");
+    println!("  togyzkumalaq-engine datagen [games] [depth] [threads] [prefix]");
     println!("                                 - Generate NNUE training data");
     println!("  togyzkumalaq-engine analyze <position> [time_ms]");
     println!("                                 - Analyze position (JSON output)");
+    println!("  togyzkumalaq-engine serve      - Persistent stdin/stdout protocol");
     println!("    Position format: w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side");
 }
 
@@ -100,6 +104,9 @@ fn play_interactive() {
 
     let stdin = io::stdin();
     let mut move_history: Vec<(board::UndoInfo, Board)> = Vec::new();
+
+    // Track positions for repetition detection
+    searcher.push_game_position(searcher.compute_hash(&board));
 
     loop {
         println!("{}", board);
@@ -131,6 +138,8 @@ fn play_interactive() {
                     move_history.pop();
                     let (_, prev_board) = move_history.pop().unwrap();
                     board = prev_board;
+                    // Rebuild game history
+                    searcher.game_history.truncate(searcher.game_history.len().saturating_sub(2));
                     println!("Undone 2 moves.");
                 } else {
                     println!("Nothing to undo.");
@@ -154,6 +163,7 @@ fn play_interactive() {
             let saved = board;
             let undo = board.make_move(pit);
             move_history.push((undo, saved));
+            searcher.push_game_position(searcher.compute_hash(&board));
             println!("You played pit {}.", pit + 1);
         } else {
             // Engine's turn
@@ -172,6 +182,7 @@ fn play_interactive() {
             let saved = board;
             let undo = board.make_move(result.best_move);
             move_history.push((undo, saved));
+            searcher.push_game_position(searcher.compute_hash(&board));
         }
     }
 }
@@ -283,6 +294,9 @@ fn run_selfplay() {
     let max_depth = 20;
     let mut move_num = 0;
 
+    // Track positions for repetition detection
+    searcher.push_game_position(searcher.compute_hash(&board));
+
     loop {
         if let Some(result) = board.game_result() {
             println!("\n{}", board);
@@ -306,6 +320,7 @@ fn run_selfplay() {
         }
 
         board.make_move(result.best_move);
+        searcher.push_game_position(searcher.compute_hash(&board));
         io::stdout().flush().unwrap();
     }
 }
@@ -330,6 +345,9 @@ fn run_match(num_games: u32, time_ms: u64) {
     let mut hce_wins = 0u32;
     let mut draws = 0u32;
 
+    // Shared zobrist keys for game history (deterministic, same as searcher's)
+    let zobrist = search::Searcher::new(1).zobrist;
+
     for game_num in 0..num_games {
         let nnue_is_white = game_num % 2 == 0;
         let mut board = Board::new();
@@ -341,6 +359,10 @@ fn run_match(num_games: u32, time_ms: u64) {
         let mut hce_searcher = Searcher::new(16);
         hce_searcher.silent = true;
 
+        // Track game positions for repetition detection
+        let mut game_hashes: Vec<u64> = Vec::new();
+        game_hashes.push(zobrist.hash(&board));
+
         loop {
             if board.is_terminal() {
                 break;
@@ -350,12 +372,15 @@ fn run_match(num_games: u32, time_ms: u64) {
             let use_nnue = is_white_turn == nnue_is_white;
 
             let result = if use_nnue {
+                nnue_searcher.game_history = game_hashes.clone();
                 nnue_searcher.search(&board, max_depth, time_ms)
             } else {
+                hce_searcher.game_history = game_hashes.clone();
                 hce_searcher.search(&board, max_depth, time_ms)
             };
 
             board.make_move(result.best_move);
+            game_hashes.push(zobrist.hash(&board));
         }
 
         match board.game_result() {
@@ -420,6 +445,150 @@ fn parse_position(pos: &str) -> Result<Board, String> {
     board.side_to_move = if side == 0 { Side::White } else { Side::Black };
 
     Ok(board)
+}
+
+/// Persistent stdin/stdout protocol for web server integration.
+/// Keeps the Searcher alive between moves so TT and game history persist.
+fn run_serve() {
+    let stdin = io::stdin();
+    let stdout = io::stdout();
+
+    let mut searcher = Searcher::new(64);
+    if let Some(nnue) = load_nnue() {
+        searcher.set_nnue(nnue);
+    }
+    searcher.silent = true;
+
+    // Signal ready
+    {
+        let mut out = stdout.lock();
+        writeln!(out, "ready").unwrap();
+        out.flush().unwrap();
+    }
+
+    for line in stdin.lock().lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(_) => break,
+        };
+        let line = line.trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match parts[0] {
+            "newgame" => {
+                searcher.clear();
+                let mut out = stdout.lock();
+                writeln!(out, "ready").unwrap();
+                out.flush().unwrap();
+            }
+            "position" => {
+                if parts.len() >= 2 {
+                    match parse_position(parts[1]) {
+                        Ok(board) => {
+                            let hash = searcher.compute_hash(&board);
+                            searcher.push_game_position(hash);
+                            let mut out = stdout.lock();
+                            writeln!(out, "ready").unwrap();
+                            out.flush().unwrap();
+                        }
+                        Err(e) => {
+                            let mut out = stdout.lock();
+                            writeln!(out, "error {}", e).unwrap();
+                            out.flush().unwrap();
+                        }
+                    }
+                }
+            }
+            "go" => {
+                let mut time_ms: u64 = 3000;
+                let mut pos_str = "";
+                let mut i = 1;
+                while i < parts.len() {
+                    match parts[i] {
+                        "time" => {
+                            if i + 1 < parts.len() {
+                                time_ms = parts[i + 1].parse().unwrap_or(3000);
+                            }
+                            i += 2;
+                        }
+                        "pos" => {
+                            if i + 1 < parts.len() {
+                                pos_str = parts[i + 1];
+                            }
+                            i += 2;
+                        }
+                        _ => {
+                            i += 1;
+                        }
+                    }
+                }
+
+                match parse_position(pos_str) {
+                    Ok(board) => {
+                        if board.is_terminal() {
+                            let result = board.game_result();
+                            let result_str = match result {
+                                Some(GameResult::Win(Side::White)) => "white_win",
+                                Some(GameResult::Win(Side::Black)) => "black_win",
+                                Some(GameResult::Draw) => "draw",
+                                None => "unknown",
+                            };
+                            let mut out = stdout.lock();
+                            writeln!(out, "terminal {}", result_str).unwrap();
+                            out.flush().unwrap();
+                        } else {
+                            let result = searcher.search(&board, 30, time_ms);
+
+                            // Push resulting position to game history
+                            let mut new_board = board;
+                            new_board.make_move(result.best_move);
+                            let new_hash = searcher.compute_hash(&new_board);
+                            searcher.push_game_position(new_hash);
+
+                            let nps = if result.time_ms > 0 {
+                                result.nodes * 1000 / result.time_ms
+                            } else {
+                                result.nodes
+                            };
+
+                            let mut out = stdout.lock();
+                            writeln!(
+                                out,
+                                "bestmove {} score {} depth {} nodes {} time {} nps {}",
+                                result.best_move,
+                                result.score,
+                                result.depth,
+                                result.nodes,
+                                result.time_ms,
+                                nps,
+                            )
+                            .unwrap();
+                            out.flush().unwrap();
+                        }
+                    }
+                    Err(e) => {
+                        let mut out = stdout.lock();
+                        writeln!(out, "error {}", e).unwrap();
+                        out.flush().unwrap();
+                    }
+                }
+            }
+            "ping" => {
+                let mut out = stdout.lock();
+                writeln!(out, "pong").unwrap();
+                out.flush().unwrap();
+            }
+            "quit" => break,
+            _ => {
+                let mut out = stdout.lock();
+                writeln!(out, "error unknown command: {}", parts[0]).unwrap();
+                out.flush().unwrap();
+            }
+        }
+    }
 }
 
 fn run_analyze(pos: &str, time_ms: u64) {

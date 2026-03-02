@@ -6,7 +6,6 @@
 /// - tuzdyk[2] positions
 /// - side to move
 
-use rand::Rng;
 use crate::board::{Board, Side, NUM_PITS};
 
 const MAX_STONES_BUCKET: usize = 32; // bucket stone counts 0..31, 32+ = same
@@ -18,28 +17,40 @@ pub struct ZobristKeys {
     side_key: u64,
 }
 
+/// Simple xorshift64 PRNG with fixed seed for deterministic hashing
+struct DeterministicRng(u64);
+impl DeterministicRng {
+    fn new(seed: u64) -> Self { DeterministicRng(seed) }
+    fn next_u64(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
 impl ZobristKeys {
     pub fn new() -> Self {
-        let mut rng = rand::thread_rng();
+        let mut rng = DeterministicRng::new(0x12345678_DEADBEEF);
 
         let mut keys = ZobristKeys {
             pit_keys: [[[0u64; MAX_STONES_BUCKET + 1]; NUM_PITS]; 2],
             kazan_keys: [[0u64; 163]; 2],
             tuzdyk_keys: [[0u64; NUM_PITS + 1]; 2],
-            side_key: rng.gen(),
+            side_key: rng.next_u64(),
         };
 
         for side in 0..2 {
             for pit in 0..NUM_PITS {
                 for stones in 0..=MAX_STONES_BUCKET {
-                    keys.pit_keys[side][pit][stones] = rng.gen();
+                    keys.pit_keys[side][pit][stones] = rng.next_u64();
                 }
             }
             for k in 0..163 {
-                keys.kazan_keys[side][k] = rng.gen();
+                keys.kazan_keys[side][k] = rng.next_u64();
             }
             for t in 0..=NUM_PITS {
-                keys.tuzdyk_keys[side][t] = rng.gen();
+                keys.tuzdyk_keys[side][t] = rng.next_u64();
             }
         }
 

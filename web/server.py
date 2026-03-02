@@ -1,16 +1,70 @@
 """
-Web server for Togyz Kumalak AI Demo.
-Serves the game UI and proxies moves to the Rust engine.
+Web server for Togyzkumalaq Championship Engine v1.0.
+Uses persistent engine process for maximum strength (TT + game history preserved).
 """
 import json
 import os
+import random
 import subprocess
+import threading
+import atexit
 from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__)
 
 ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'engine')
 ENGINE_PATH = os.path.join(ENGINE_DIR, 'target', 'release', 'togyzkumalaq-engine')
+
+# Persistent engine process
+engine_proc = None
+engine_lock = threading.Lock()
+
+# Opening book
+BOOK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'opening_book.json')
+opening_book = None
+
+
+def start_engine():
+    """Start the persistent engine subprocess."""
+    global engine_proc
+    engine_proc = subprocess.Popen(
+        [ENGINE_PATH, 'serve'],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        cwd=ENGINE_DIR,
+    )
+    line = engine_proc.stdout.readline().strip()
+    if line != 'ready':
+        raise RuntimeError(f"Engine did not start properly, got: {line}")
+    print(f"Engine started (PID {engine_proc.pid})")
+
+
+def stop_engine():
+    """Stop the engine process cleanly."""
+    global engine_proc
+    if engine_proc and engine_proc.poll() is None:
+        try:
+            engine_proc.stdin.write('quit\n')
+            engine_proc.stdin.flush()
+            engine_proc.wait(timeout=5)
+        except Exception:
+            engine_proc.kill()
+        print("Engine stopped")
+
+
+def send_command(cmd):
+    """Send a command to the engine and read one line of response."""
+    global engine_proc
+    if engine_proc is None or engine_proc.poll() is not None:
+        print("Engine not running, restarting...")
+        start_engine()
+    engine_proc.stdin.write(cmd + '\n')
+    engine_proc.stdin.flush()
+    line = engine_proc.stdout.readline().strip()
+    return line
 
 
 def board_to_pos(state):
@@ -23,6 +77,60 @@ def board_to_pos(state):
     return f"{wp}/{bp}/{k}/{t}/{s}"
 
 
+def load_opening_book():
+    """Load opening book from JSON file."""
+    global opening_book
+    if os.path.exists(BOOK_PATH):
+        with open(BOOK_PATH) as f:
+            opening_book = json.load(f)
+        print(f"Opening book loaded: {len(opening_book.get('positions', {}))} positions")
+    else:
+        print("No opening book found (run generate_book.py to create one)")
+
+
+def lookup_book_move(pos_string):
+    """Look up a book move. Returns (move, book_info) or (None, None)."""
+    if not opening_book:
+        return None, None
+    positions = opening_book.get('positions', {})
+    entry = positions.get(pos_string)
+    if not entry or entry.get('total', 0) < 3:
+        return None, None
+
+    moves = entry.get('moves', {})
+    if not moves:
+        return None, None
+
+    # Weighted selection by frequency * win rate
+    candidates = []
+    for move_str, stats in moves.items():
+        count = stats.get('count', 0)
+        if count < 2:
+            continue
+        wins = stats.get('wins', 0)
+        draws = stats.get('draws', 0)
+        win_rate = (wins + draws * 0.5) / max(count, 1)
+        weight = count * (0.3 + win_rate)
+        candidates.append((int(move_str), weight, stats, win_rate))
+
+    if not candidates:
+        return None, None
+
+    total_weight = sum(w for _, w, _, _ in candidates)
+    r = random.random() * total_weight
+    cumulative = 0
+    for move, weight, stats, win_rate in candidates:
+        cumulative += weight
+        if cumulative >= r:
+            return move, {
+                'source': 'book',
+                'games': stats.get('count', 0),
+                'win_rate': round(win_rate, 3),
+            }
+
+    return candidates[0][0], {'source': 'book', 'games': candidates[0][2].get('count', 0)}
+
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
@@ -33,24 +141,91 @@ def get_engine_move():
     data = request.json
     pos = board_to_pos(data['board'])
     time_ms = data.get('time_ms', 3000)
+    use_book = data.get('use_book', True)
 
-    try:
-        result = subprocess.run(
-            [ENGINE_PATH, 'analyze', pos, str(time_ms)],
-            capture_output=True, text=True, timeout=30,
-            cwd=ENGINE_DIR,
-        )
-        output = result.stdout.strip()
-        if not output:
-            return jsonify({'error': 'Engine produced no output', 'stderr': result.stderr}), 500
-        return jsonify(json.loads(output))
-    except subprocess.TimeoutExpired:
-        return jsonify({'error': 'Engine timed out'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+    # Try opening book first
+    if use_book:
+        book_move, book_info = lookup_book_move(pos)
+        if book_move is not None:
+            return jsonify({
+                'bestmove': book_move,
+                'score': 0,
+                'depth': 0,
+                'nodes': 0,
+                'time_ms': 0,
+                'nps': 0,
+                'book': book_info,
+            })
 
+    # Engine search with persistent process
+    with engine_lock:
+        try:
+            response = send_command(f'go time {time_ms} pos {pos}')
+
+            if response.startswith('terminal'):
+                parts = response.split()
+                result_str = parts[1] if len(parts) > 1 else 'unknown'
+                return jsonify({'terminal': True, 'result': result_str})
+
+            if response.startswith('bestmove'):
+                parts = response.split()
+                result = {}
+                i = 0
+                while i < len(parts) - 1:
+                    key = parts[i]
+                    val = parts[i + 1]
+                    if key == 'bestmove':
+                        result['bestmove'] = int(val)
+                    elif key == 'score':
+                        result['score'] = int(val)
+                    elif key == 'depth':
+                        result['depth'] = int(val)
+                    elif key == 'nodes':
+                        result['nodes'] = int(val)
+                    elif key == 'time':
+                        result['time_ms'] = int(val)
+                    elif key == 'nps':
+                        result['nps'] = int(val)
+                    i += 1
+                return jsonify(result)
+
+            if response.startswith('error'):
+                return jsonify({'error': response}), 500
+
+            return jsonify({'error': f'Unexpected: {response}'}), 500
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/newgame', methods=['POST'])
+def new_game():
+    """Reset engine state for a new game."""
+    with engine_lock:
+        try:
+            response = send_command('newgame')
+            return jsonify({'status': 'ok'})
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/position', methods=['POST'])
+def push_position():
+    """Push a position to engine's game history (after human moves)."""
+    data = request.json
+    pos = board_to_pos(data['board'])
+    with engine_lock:
+        try:
+            response = send_command(f'position {pos}')
+            return jsonify({'status': 'ok'})
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+
+atexit.register(stop_engine)
 
 if __name__ == '__main__':
     print(f"Engine: {ENGINE_PATH}")
+    load_opening_book()
+    start_engine()
     print(f"Starting server at http://localhost:8080")
     app.run(host='0.0.0.0', port=8080, debug=False)

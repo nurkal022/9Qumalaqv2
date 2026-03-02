@@ -23,6 +23,7 @@ use crate::board::{Board, NUM_PITS};
 const INPUT_SIZE: usize = 40;
 const SCALE: i32 = 64;
 
+#[derive(Clone)]
 pub struct NnueNetwork {
     hidden1: usize,
     hidden2: usize,

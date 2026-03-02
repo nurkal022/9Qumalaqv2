@@ -98,12 +98,23 @@ class PositionDataset(Dataset):
         result_stm = np.where(is_white, results, 1.0 - results)
         self.result_targets = result_stm
 
-        # Combined target: lambda * sigmoid(eval/K) + (1-lambda) * result
-        # We'll compute this in training loop with configurable lambda
+        # Endgame weight: positions with fewer stones on board get higher weight
+        pit_stones = pits_w.sum(axis=1) + pits_b.sum(axis=1)
+        self.sample_weights = np.ones(num_records, dtype=np.float32)
+        # Endgame: 2x weight for positions with ≤30 stones on pits
+        self.sample_weights[pit_stones <= 30] = 2.0
+        # Deep endgame: 3x weight for positions with ≤15 stones
+        self.sample_weights[pit_stones <= 15] = 3.0
 
+        # Adaptive lambda: use lower lambda for positions without eval (eval=0)
+        self.has_eval = (np.abs(evals) > 1).astype(np.float32)
+
+        endgame_count = np.sum(pit_stones <= 30)
         print(f"  Features shape: {self.features.shape}")
         print(f"  Eval range: [{evals.min():.0f}, {evals.max():.0f}]")
         print(f"  Results: W={np.sum(results > 0.6)}, D={np.sum(np.abs(results - 0.5) < 0.1)}, L={np.sum(results < 0.4)}")
+        print(f"  Endgame (pits≤30): {endgame_count:,} ({100*endgame_count/num_records:.1f}%)")
+        print(f"  Positions with eval: {int(self.has_eval.sum()):,} ({100*self.has_eval.mean():.1f}%)")
 
     def __len__(self):
         return len(self.features)
@@ -113,6 +124,8 @@ class PositionDataset(Dataset):
             torch.tensor(self.features[idx]),
             torch.tensor(self.eval_targets[idx]),
             torch.tensor(self.result_targets[idx]),
+            torch.tensor(self.sample_weights[idx]),
+            torch.tensor(self.has_eval[idx]),
         )
 
 
@@ -173,21 +186,29 @@ def train(args):
         total_loss = 0.0
         n_batches = 0
 
-        for features, evals, results in train_loader:
+        for features, evals, results, weights, has_eval in train_loader:
             features = features.to(device)
             evals = evals.to(device)
             results = results.to(device)
+            weights = weights.to(device)
+            has_eval = has_eval.to(device)
 
             pred = model(features)
 
             # Prediction as win probability
             pred_wp = sigmoid_eval(pred)
 
+            # Adaptive lambda: use configured lambda for positions with eval,
+            # use lambda=0 (pure result) for positions without eval
+            effective_lam = lam * has_eval
+
             # Target: blend of search eval and game result
             eval_wp = sigmoid_eval(evals)
-            target = lam * eval_wp + (1 - lam) * results
+            target = effective_lam * eval_wp + (1 - effective_lam) * results
 
-            loss = torch.mean((pred_wp - target) ** 2)
+            # Weighted MSE loss (endgame positions get higher weight)
+            per_sample_loss = (pred_wp - target) ** 2
+            loss = torch.mean(per_sample_loss * weights)
 
             optimizer.zero_grad()
             loss.backward()
@@ -203,17 +224,21 @@ def train(args):
         val_loss = 0.0
         n_val_batches = 0
         with torch.no_grad():
-            for features, evals, results in val_loader:
+            for features, evals, results, weights, has_eval in val_loader:
                 features = features.to(device)
                 evals = evals.to(device)
                 results = results.to(device)
+                weights = weights.to(device)
+                has_eval = has_eval.to(device)
 
                 pred = model(features)
                 pred_wp = sigmoid_eval(pred)
-                eval_wp = sigmoid_eval(evals)
-                target = lam * eval_wp + (1 - lam) * results
 
-                val_loss += torch.mean((pred_wp - target) ** 2).item()
+                effective_lam = lam * has_eval
+                eval_wp = sigmoid_eval(evals)
+                target = effective_lam * eval_wp + (1 - effective_lam) * results
+
+                val_loss += torch.mean((pred_wp - target) ** 2 * weights).item()
                 n_val_batches += 1
 
         avg_train = total_loss / n_batches
