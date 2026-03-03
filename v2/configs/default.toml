@@ -1,0 +1,31 @@
+# V2 Gumbel AlphaZero Configuration
+
+[network]
+input_size = 70
+hidden_size = 256
+num_blocks = 6
+num_actions = 9
+
+[selfplay]
+games_per_generation = 3000
+simulations_per_move = 100
+gumbel_candidates = 8
+temperature_moves = 15
+max_moves_per_game = 300
+threads = 8
+
+[training]
+epochs = 10
+batch_size = 512
+learning_rate = 0.001
+weight_decay = 0.0001
+entropy_coefficient = 0.01
+gradient_clip = 1.0
+
+[arena]
+games = 200
+win_threshold = 0.55
+
+[gumbel]
+c_puct = 1.5
+sigma_scale = 50.0

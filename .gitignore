@@ -42,6 +42,12 @@ engine/nnue_weights_v2.bin
 
 # Rust build artifacts
 engine/target/
+v2/rust/target/
+
+# V2 training data and models (generated at runtime)
+v2/data/*.bin
+v2/models/*.pt
+v2/models/*.onnx
 
 # IDE
 .vscode/

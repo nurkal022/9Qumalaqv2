@@ -1,0 +1,18 @@
+[package]
+name = "v2_engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ort = { version = "2.0.0-rc.11", features = ["load-dynamic"], default-features = false }
+ndarray = "0.16"
+rand = "0.8"
+rayon = "1.10"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+byteorder = "1.5"
+
+[profile.release]
+opt-level = 3
+lto = true
