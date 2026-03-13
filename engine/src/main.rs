@@ -1,5 +1,7 @@
 mod board;
+mod book;
 mod datagen;
+mod egtb;
 mod eval;
 mod nnue;
 mod search;
@@ -8,11 +10,36 @@ mod tt;
 mod zobrist;
 
 use std::io::{self, BufRead, Write};
+use std::sync::Arc;
 use board::{Board, Side, GameResult, NUM_PITS};
+use book::OpeningBook;
 use nnue::NnueNetwork;
 use search::Searcher;
 
 const NNUE_PATH: &str = "nnue_weights.bin";
+const BOOK_PATH: &str = "opening_book.txt";
+const EGTB_PATH: &str = "egtb.bin";
+
+fn load_book() -> Option<OpeningBook> {
+    OpeningBook::load(BOOK_PATH)
+}
+
+fn load_egtb() -> Option<Arc<egtb::EndgameTablebase>> {
+    if std::path::Path::new(EGTB_PATH).exists() {
+        match egtb::EndgameTablebase::load(EGTB_PATH) {
+            Ok(tb) => {
+                eprintln!("EGTB loaded: {} entries, max {} stones", tb.len(), tb.max_stones);
+                Some(Arc::new(tb))
+            }
+            Err(e) => {
+                eprintln!("Warning: failed to load EGTB: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    }
+}
 
 fn load_nnue() -> Option<NnueNetwork> {
     if std::path::Path::new(NNUE_PATH).exists() {
@@ -47,14 +74,48 @@ fn main() {
                 let time_ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(500);
                 run_match(num_games, time_ms);
             }
+            "match-nnue" => {
+                // match-nnue <weights_a> <weights_b> [games] [time_ms]
+                let weights_a = args.get(2).map(|s| s.as_str()).unwrap_or("nnue_weights.bin");
+                let weights_b = args.get(3).map(|s| s.as_str()).unwrap_or("nnue_weights_champion_backup.bin");
+                let num_games: u32 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(200);
+                let time_ms: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(500);
+                run_match_nnue(weights_a, weights_b, num_games, time_ms);
+            }
             "datagen" => {
                 let num_games: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10000);
                 let depth: i32 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(8);
                 let threads: u32 = args.get(4).and_then(|s| s.parse().ok())
                     .unwrap_or(std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4));
                 let prefix = args.get(5).map(|s| s.as_str()).unwrap_or("local");
-                let nnue = load_nnue();
-                datagen::run_datagen(num_games, depth, 500, threads, nnue, prefix);
+                // Use --hce flag or "hce" prefix to force HCE eval (needed for K=1050 training)
+                let use_hce = args.iter().any(|a| a == "--hce") || prefix.contains("hce");
+                // --hybrid: NNUE plays games, HCE static eval provides labels
+                let use_hybrid = args.iter().any(|a| a == "--hybrid");
+                let nnue = if use_hce && !use_hybrid {
+                    eprintln!("Datagen: using HCE eval (for K=1050 training compatibility)");
+                    None
+                } else {
+                    load_nnue()
+                };
+                let use_hce_labels = use_hce || use_hybrid;
+                let endgame = args.iter().any(|a| a == "--endgame");
+                let starts_file = args.iter().position(|a| a == "--starts")
+                    .and_then(|i| args.get(i + 1).map(|s| s.as_str()));
+                datagen::run_datagen(num_games, depth, 500, threads, nnue, prefix, use_hce_labels, endgame, starts_file);
+            }
+            "egtb-gen" => {
+                let max_stones: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
+                let output = args.get(3).map(|s| s.as_str()).unwrap_or(EGTB_PATH);
+                egtb::generate_egtb(max_stones, output);
+            }
+            "egtb-verify" => {
+                let num_tests: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(10000);
+                if let Some(tb) = load_egtb() {
+                    egtb::verify_egtb(&tb, num_tests);
+                } else {
+                    eprintln!("No EGTB file found at {}", EGTB_PATH);
+                }
             }
             "analyze" => {
                 // Format: analyze "w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side" [time_ms]
@@ -89,14 +150,25 @@ fn print_usage() {
     println!("    Position format: w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side");
 }
 
+fn get_num_threads() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
 fn play_interactive() {
     let mut board = Board::new();
     let mut searcher = Searcher::new(64);
     if let Some(nnue) = load_nnue() {
         searcher.set_nnue(nnue);
     }
+    if let Some(tb) = load_egtb() {
+        searcher.set_egtb(tb);
+    }
+    if let Some(book) = load_book() {
+        searcher.set_book(book);
+    }
     let search_time_ms: u64 = 3000;
     let max_depth: i32 = 30;
+    let num_threads = get_num_threads();
 
     println!("Togyzkumalaq Engine v0.1");
     println!("You play White. Enter pit number 1-9.");
@@ -167,8 +239,8 @@ fn play_interactive() {
             println!("You played pit {}.", pit + 1);
         } else {
             // Engine's turn
-            println!("Engine thinking...");
-            let result = searcher.search(&board, max_depth, search_time_ms);
+            println!("Engine thinking ({} threads)...", num_threads);
+            let result = searcher.search_smp(&board, max_depth, search_time_ms, num_threads);
 
             println!(
                 "Engine plays pit {} (score: {}, depth: {}, nodes: {}, time: {}ms)",
@@ -345,6 +417,9 @@ fn run_match(num_games: u32, time_ms: u64) {
     let mut hce_wins = 0u32;
     let mut draws = 0u32;
 
+    // Load EGTB once, share across all games
+    let egtb = load_egtb();
+
     // Shared zobrist keys for game history (deterministic, same as searcher's)
     let zobrist = search::Searcher::new(1).zobrist;
 
@@ -354,6 +429,10 @@ fn run_match(num_games: u32, time_ms: u64) {
 
         let mut nnue_searcher = Searcher::new(16);
         nnue_searcher.set_nnue(NnueNetwork::load(NNUE_PATH).unwrap());
+        if let Some(ref tb) = egtb {
+            nnue_searcher.set_egtb(tb.clone());
+        }
+        // Opening book disabled: human moves are weaker than engine search
         nnue_searcher.silent = true;
 
         let mut hce_searcher = Searcher::new(16);
@@ -416,6 +495,135 @@ fn run_match(num_games: u32, time_ms: u64) {
     }
 }
 
+fn run_match_nnue(weights_a: &str, weights_b: &str, num_games: u32, time_ms: u64) {
+    println!("NNUE vs NNUE Match");
+    println!("==============================");
+    println!("Engine A: {}", weights_a);
+    println!("Engine B: {}", weights_b);
+    println!("Games: {} (alternating colors, 4 random opening plies)", num_games);
+    println!("Time per move: {}ms", time_ms);
+    println!();
+
+    let _nnue_a = match NnueNetwork::load(weights_a) {
+        Ok(n) => n,
+        Err(e) => { println!("Error loading {}: {}", weights_a, e); return; }
+    };
+    let _nnue_b = match NnueNetwork::load(weights_b) {
+        Ok(n) => n,
+        Err(e) => { println!("Error loading {}: {}", weights_b, e); return; }
+    };
+
+    let max_depth = 20;
+    let mut a_wins = 0u32;
+    let mut b_wins = 0u32;
+    let mut draws = 0u32;
+
+    let egtb = load_egtb();
+    let zobrist = search::Searcher::new(1).zobrist;
+
+    // Simple RNG for random openings
+    let mut rng_state: u64 = 0xDEADBEEF12345678;
+    let mut rng_next = |state: &mut u64| -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    };
+
+    // Games are played in pairs: same opening, alternating colors
+    for game_num in 0..num_games {
+        let a_is_white = game_num % 2 == 0;
+        let mut board = Board::new();
+
+        // Random opening: 4 plies of random moves (same opening for each pair)
+        let opening_seed = if game_num % 2 == 0 {
+            rng_next(&mut rng_state)
+        } else {
+            // Reuse same seed as previous game for same opening
+            rng_state // state hasn't changed since the paired game used it
+        };
+        let mut opening_rng = opening_seed;
+        for _ in 0..4 {
+            if board.is_terminal() { break; }
+            let mut moves = [0usize; 9];
+            let num_moves = board.valid_moves_array(&mut moves);
+            if num_moves == 0 { break; }
+            let idx = (rng_next(&mut opening_rng) % num_moves as u64) as usize;
+            board.make_move(moves[idx]);
+        }
+
+        let mut searcher_a = Searcher::new(16);
+        searcher_a.set_nnue(NnueNetwork::load(weights_a).expect("Failed to load A"));
+        if let Some(ref tb) = egtb {
+            searcher_a.set_egtb(tb.clone());
+        }
+        searcher_a.silent = true;
+
+        let mut searcher_b = Searcher::new(16);
+        searcher_b.set_nnue(NnueNetwork::load(weights_b).expect("Failed to load B"));
+        if let Some(ref tb) = egtb {
+            searcher_b.set_egtb(tb.clone());
+        }
+        searcher_b.silent = true;
+
+        let mut game_hashes: Vec<u64> = Vec::new();
+        game_hashes.push(zobrist.hash(&board));
+        let mut move_count = 0u32;
+
+        loop {
+            if board.is_terminal() { break; }
+            // Safety: max 300 moves per game to prevent infinite loops
+            if move_count >= 200 { break; }
+            move_count += 1;
+
+            let is_white_turn = board.side_to_move == Side::White;
+            let use_a = is_white_turn == a_is_white;
+
+            let result = if use_a {
+                searcher_a.game_history = game_hashes.clone();
+                searcher_a.search(&board, max_depth, time_ms)
+            } else {
+                searcher_b.game_history = game_hashes.clone();
+                searcher_b.search(&board, max_depth, time_ms)
+            };
+
+            board.make_move(result.best_move);
+            game_hashes.push(zobrist.hash(&board));
+        }
+
+        match board.game_result() {
+            Some(GameResult::Win(Side::White)) => {
+                if a_is_white { a_wins += 1; } else { b_wins += 1; }
+            }
+            Some(GameResult::Win(Side::Black)) => {
+                if !a_is_white { a_wins += 1; } else { b_wins += 1; }
+            }
+            Some(GameResult::Draw) | None => { draws += 1; }
+        }
+
+        let total = game_num + 1;
+        if total % 10 == 0 || total == num_games {
+            let score_a = (a_wins as f64 + draws as f64 * 0.5) / total as f64 * 100.0;
+            println!(
+                "Game {}/{}: A {}-{}-{} B ({:.1}%)",
+                total, num_games, a_wins, draws, b_wins, score_a,
+            );
+        }
+    }
+
+    println!("\n==============================");
+    println!("Final: A {} - {} - {} B", a_wins, draws, b_wins);
+    let score = (a_wins as f64 + draws as f64 * 0.5) / num_games as f64;
+    println!("A score: {:.1}%", score * 100.0);
+    if score > 0.5 {
+        let elo = -400.0 * (1.0 / score - 1.0).ln() / std::f64::consts::LN_10;
+        println!("A Elo advantage: +{:.0}", elo);
+    } else if score < 0.5 {
+        let elo = -400.0 * (1.0 / (1.0 - score) - 1.0).ln() / std::f64::consts::LN_10;
+        println!("B Elo advantage: +{:.0}", elo);
+    }
+}
+
 /// Parse position string: "w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side"
 fn parse_position(pos: &str) -> Result<Board, String> {
     let parts: Vec<&str> = pos.split('/').collect();
@@ -452,10 +660,17 @@ fn parse_position(pos: &str) -> Result<Board, String> {
 fn run_serve() {
     let stdin = io::stdin();
     let stdout = io::stdout();
+    let num_threads = get_num_threads();
 
     let mut searcher = Searcher::new(64);
     if let Some(nnue) = load_nnue() {
         searcher.set_nnue(nnue);
+    }
+    if let Some(tb) = load_egtb() {
+        searcher.set_egtb(tb);
+    }
+    if let Some(book) = load_book() {
+        searcher.set_book(book);
     }
     searcher.silent = true;
 
@@ -540,7 +755,7 @@ fn run_serve() {
                             writeln!(out, "terminal {}", result_str).unwrap();
                             out.flush().unwrap();
                         } else {
-                            let result = searcher.search(&board, 30, time_ms);
+                            let result = searcher.search_smp(&board, 30, time_ms, num_threads);
 
                             // Push resulting position to game history
                             let mut new_board = board;
@@ -616,6 +831,9 @@ fn run_analyze(pos: &str, time_ms: u64) {
     searcher.silent = true;
     if let Some(nnue) = load_nnue() {
         searcher.set_nnue(nnue);
+    }
+    if let Some(tb) = load_egtb() {
+        searcher.set_egtb(tb);
     }
 
     let result = searcher.search(&board, 30, time_ms);

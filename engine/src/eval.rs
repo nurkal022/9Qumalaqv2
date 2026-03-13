@@ -7,8 +7,9 @@ use crate::board::{Board, NUM_PITS};
 
 /// Evaluation weights — Texel-tuned from 77K PlayOK positions (44% error reduction)
 const MATERIAL_WEIGHT: i32 = 21;
-const TUZDYK_BASE: i32 = 504;
-const TUZDYK_CENTER_BONUS: i32 = 63;
+/// Position-specific tuzdyk values from PlayOK 533K game winrate analysis
+/// Pit7=62.2%, Pit5=60.1%, Pit6=58.5%, Pit4=55.2%, Pit2=53.1%, Pit3=52.0%, Pit8=51.5%, Pit1=50.3%
+const TUZDYK_VALUE: [i32; 9] = [350, 420, 400, 450, 550, 530, 560, 380, 0];
 const THREAT_WEIGHT: i32 = 11;        // tuzdyk creation threat
 const PIT_STONES_WEIGHT: i32 = 3;
 const MOBILITY_WEIGHT: i32 = 124;     // most important positional factor
@@ -62,29 +63,12 @@ pub fn evaluate(board: &Board) -> i32 {
         score -= (board.kazan[opp] as i32 - 70) * 30;
     }
 
-    // 2. Tuzdyk evaluation
+    // 2. Tuzdyk evaluation — position-specific values from 533K game analysis
     if board.tuzdyk[me] >= 0 {
-        let pos = board.tuzdyk[me] as usize;
-        score += TUZDYK_BASE;
-        // Center tuzdyks are stronger (collect more stones passing through)
-        let center_bonus = match pos {
-            3 | 4 | 5 => 3,
-            2 | 6 => 2,
-            1 | 7 => 1,
-            _ => 0,
-        };
-        score += center_bonus * TUZDYK_CENTER_BONUS;
+        score += TUZDYK_VALUE[board.tuzdyk[me] as usize];
     }
     if board.tuzdyk[opp] >= 0 {
-        let pos = board.tuzdyk[opp] as usize;
-        score -= TUZDYK_BASE;
-        let center_bonus = match pos {
-            3 | 4 | 5 => 3,
-            2 | 6 => 2,
-            1 | 7 => 1,
-            _ => 0,
-        };
-        score -= center_bonus * TUZDYK_CENTER_BONUS;
+        score -= TUZDYK_VALUE[board.tuzdyk[opp] as usize];
     }
 
     // 3. Tuzdyk threats (opponent pits with 2 stones = one move from 3 = tuzdyk opportunity)
@@ -176,6 +160,54 @@ pub fn evaluate(board: &Board) -> i32 {
     }
     if material_diff < -5 && my_pit_stones <= 3 {
         score -= (4 - my_pit_stones) * STARVATION_FINISH;
+    }
+
+    // 11. Endgame right-pit bonus (pits 7-9 dominate endgame: 50% of expert moves)
+    let total_stones = board.total_board_stones();
+    if total_stones <= 40 {
+        let my_right: i32 = board.pits[me][6..9].iter().map(|&x| x as i32).sum();
+        let opp_right: i32 = board.pits[opp][6..9].iter().map(|&x| x as i32).sum();
+        score += (my_right - opp_right) * 3;
+    }
+
+    // 12. Midgame positional eval (ply 30-60: board mass, heavy pits, scatter penalty)
+    let ply = board.move_count;
+    if ply >= 30 && ply <= 60 {
+        // Board mass bonus: keeping stones on our side = more options
+        score += (my_pit_stones - opp_pit_stones) * 2;
+
+        // Heavy pit bonus: pits with 10+ stones are tactical weapons
+        for i in 0..NUM_PITS {
+            if board.pits[me][i] >= 10 {
+                score += 5;
+            }
+            if board.pits[opp][i] >= 10 {
+                score -= 5;
+            }
+        }
+
+        // Scatter penalty: many pits with 1-2 stones = weak, fragmented position
+        let mut my_scattered = 0i32;
+        let mut opp_scattered = 0i32;
+        for i in 0..NUM_PITS {
+            if board.pits[me][i] >= 1 && board.pits[me][i] <= 2 {
+                my_scattered += 1;
+            }
+            if board.pits[opp][i] >= 1 && board.pits[opp][i] <= 2 {
+                opp_scattered += 1;
+            }
+        }
+        if my_scattered >= 5 {
+            score -= (my_scattered - 4) * 10;
+        }
+        if opp_scattered >= 5 {
+            score += (opp_scattered - 4) * 10;
+        }
+
+        // Right-pit bonus in midgame too (lower weight)
+        let my_right: i32 = board.pits[me][6..9].iter().map(|&x| x as i32).sum();
+        let opp_right: i32 = board.pits[opp][6..9].iter().map(|&x| x as i32).sum();
+        score += (my_right - opp_right) * 2;
     }
 
     score

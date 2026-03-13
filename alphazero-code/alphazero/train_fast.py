@@ -260,11 +260,11 @@ class ParallelSelfPlay:
     Plays multiple games simultaneously with batched MCTS
     """
     
-    def __init__(self, model, config: FastConfig, device='cuda'):
+    def __init__(self, model, config: FastConfig, device='cuda', use_amp=False):
         self.model = model
         self.config = config
         self.device = device
-        self.mcts = TrueBatchMCTS(model, config.num_simulations, device=device, use_amp=True)
+        self.mcts = TrueBatchMCTS(model, config.num_simulations, device=device, use_amp=use_amp)
     
     def play_games(self, num_games: int) -> list:
         """Play multiple games in batches"""
@@ -436,7 +436,7 @@ class FastTrainer:
         """Generate training data with batch MCTS"""
         self.model.eval()
         
-        player = ParallelSelfPlay(self.model, self.config, self.device)
+        player = ParallelSelfPlay(self.model, self.config, self.device, use_amp=self.use_amp)
         examples = player.play_games(self.config.games_per_iteration)
         
         # Add to buffer
@@ -519,7 +519,7 @@ class FastTrainer:
         self.model.eval()
         wins = 0
         
-        mcts = TrueBatchMCTS(self.model, num_simulations=100, device=self.device, use_amp=True)
+        mcts = TrueBatchMCTS(self.model, num_simulations=100, device=self.device, use_amp=self.use_amp)
         
         for i in range(self.config.eval_games):
             game = TogyzQumalaq()
@@ -726,6 +726,12 @@ def main():
                        help="Training batch size")
     parser.add_argument("--resume", type=str, default=None,
                        help="Resume training from checkpoint")
+    parser.add_argument("--no-amp", action="store_true",
+                       help="Disable AMP (fixes Conv1d + BF16 crash)")
+    parser.add_argument("--eval-interval", type=int, default=5,
+                       help="Evaluate every N iterations")
+    parser.add_argument("--save-interval", type=int, default=5,
+                       help="Save every N iterations")
     args = parser.parse_args()
     
     config = FastConfig(
@@ -734,10 +740,15 @@ def main():
         num_simulations=args.simulations,
         batch_size_games=args.batch_games,
         num_iterations=args.iterations,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        eval_interval=args.eval_interval,
+        save_interval=args.save_interval,
     )
-    
+
     trainer = FastTrainer(config)
+    if args.no_amp:
+        trainer.use_amp = False
+        print("AMP disabled (--no-amp)")
     
     if args.resume:
         if not os.path.exists(args.resume):
