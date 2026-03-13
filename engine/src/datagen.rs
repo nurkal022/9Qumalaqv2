@@ -15,16 +15,18 @@
 ///   result:         1 byte  (0=white_loss, 1=draw, 2=white_win)
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Write, Read};
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::board::{Board, Side, GameResult};
+use crate::board::{Board, Side, GameResult, NUM_PITS, WIN_THRESHOLD};
+use crate::eval::evaluate;
 use crate::nnue::NnueNetwork;
 use crate::search::Searcher;
 
 const RECORD_SIZE: usize = 26;
+const TOTAL_STONES: u8 = 162;
 
 /// Pack a position into 26 bytes
 fn pack_position(board: &Board, eval: i16, result: u8) -> [u8; RECORD_SIZE] {
@@ -73,7 +75,115 @@ impl Rng {
     }
 }
 
+/// Generate a random valid endgame position with a target number of board stones.
+/// Returns None if the generated position is terminal or has no legal moves.
+fn random_endgame_position(rng: &mut Rng, max_board_stones: u8) -> Option<Board> {
+    // Pick random total stones on board: 3..=max_board_stones
+    let n = 3 + rng.range((max_board_stones - 2) as usize) as u8;
+
+    // Distribute remaining stones to kazans
+    // Total in kazans = 162 - n. Split between two players, both must be < 82
+    let kazan_total = TOTAL_STONES - n;
+    // kw can range from max(0, kazan_total - 81) to min(81, kazan_total)
+    let kw_min = if kazan_total > 81 { kazan_total - 81 } else { 0 };
+    let kw_max = std::cmp::min(81, kazan_total);
+    if kw_min > kw_max {
+        return None;
+    }
+    let kw = kw_min + rng.range((kw_max - kw_min + 1) as usize) as u8;
+    let kb = kazan_total - kw;
+
+    // Distribute n stones randomly across 18 pits
+    let mut pits = [[0u8; NUM_PITS]; 2];
+    for _ in 0..n {
+        let pit = rng.range(18);
+        let side = pit / 9;
+        let idx = pit % 9;
+        pits[side][idx] += 1;
+    }
+
+    // Random tuzdyk (most positions don't have one)
+    let mut tuzdyk = [-1i8; 2];
+    let tuz_chance = rng.range(4); // ~25% chance of having tuzdyks
+    if tuz_chance == 0 {
+        // White's tuzdyk (on black's side): pits 1-7 (indices 1-7, not pit 8)
+        let idx = 1 + rng.range(7);
+        tuzdyk[0] = idx as i8;
+    }
+    let tuz_chance2 = rng.range(4);
+    if tuz_chance2 == 0 {
+        let idx = 1 + rng.range(7);
+        // Can't be same pit as opponent's tuzdyk
+        if tuzdyk[0] != idx as i8 {
+            tuzdyk[1] = idx as i8;
+        }
+    }
+
+    // Random side to move
+    let side_to_move = if rng.range(2) == 0 { Side::White } else { Side::Black };
+
+    let board = Board::from_parts(pits, [kw, kb], tuzdyk, side_to_move);
+
+    // Validate: not terminal, has legal moves
+    if board.is_terminal() {
+        return None;
+    }
+    let mut moves = [0usize; NUM_PITS];
+    let num_moves = board.valid_moves_array(&mut moves);
+    if num_moves == 0 {
+        return None;
+    }
+
+    Some(board)
+}
+
+/// Load starting positions from binary file (23 bytes each).
+/// Format: u32 count + count * 23 bytes (pits0[9] + pits1[9] + kazan[2] + tuzdyk[2] + side[1])
+pub fn load_starting_positions(path: &str) -> Vec<Board> {
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("Failed to load starting positions from {}: {}", path, e);
+            return Vec::new();
+        }
+    };
+
+    let mut count_buf = [0u8; 4];
+    if file.read_exact(&mut count_buf).is_err() {
+        return Vec::new();
+    }
+    let count = u32::from_le_bytes(count_buf) as usize;
+
+    let mut positions = Vec::with_capacity(count);
+    let mut buf = [0u8; 23];
+
+    for _ in 0..count {
+        if file.read_exact(&mut buf).is_err() {
+            break;
+        }
+
+        let mut pits = [[0u8; NUM_PITS]; 2];
+        for i in 0..9 {
+            pits[0][i] = buf[i];
+            pits[1][i] = buf[9 + i];
+        }
+        let kazan = [buf[18], buf[19]];
+        let tuzdyk = [buf[20] as i8, buf[21] as i8];
+        let side = if buf[22] == 0 { Side::White } else { Side::Black };
+
+        let board = Board::from_parts(pits, kazan, tuzdyk, side);
+        if !board.is_terminal() {
+            positions.push(board);
+        }
+    }
+
+    eprintln!("Loaded {} starting positions from {}", positions.len(), path);
+    positions
+}
+
 /// Play one self-play game, return positions
+/// When use_hce_labels=true, positions are labeled with HCE static eval
+/// instead of search score (for hybrid NNUE-gameplay + HCE-label datagen)
 fn play_game(
     searcher: &mut Searcher,
     search_depth: i32,
@@ -81,15 +191,37 @@ fn play_game(
     rng: &mut Rng,
     adjudicate: bool,
     eval_scale: f64,
+    use_hce_labels: bool,
+    endgame_start: bool,
+    expert_starts: &[Board],
 ) -> Vec<[u8; RECORD_SIZE]> {
-    let mut board = Board::new();
+    let mut board = if !expert_starts.is_empty() {
+        // Pick a random expert midgame position
+        let idx = rng.range(expert_starts.len());
+        expert_starts[idx]
+    } else if endgame_start {
+        // Try up to 20 times to get a valid endgame position
+        let mut pos = None;
+        for _ in 0..20 {
+            if let Some(b) = random_endgame_position(rng, 50) {
+                pos = Some(b);
+                break;
+            }
+        }
+        match pos {
+            Some(b) => b,
+            None => Board::new(), // fallback
+        }
+    } else {
+        Board::new()
+    };
     let mut positions: Vec<(Board, i16)> = Vec::with_capacity(120);
     let mut ply = 0;
 
-    // Random opening: first 8 plies are random moves
-    const RANDOM_PLIES: usize = 8;
+    // Random opening: first N plies are random moves (fewer for endgame starts)
+    let random_plies: usize = if endgame_start { 2 } else { 8 };
     const MAX_PLIES: usize = 300; // prevent infinite games
-    const ADJUDICATE_THRESHOLD: i32 = 8500; // near-terminal
+    const ADJUDICATE_THRESHOLD: i32 = 200; // ~winning advantage in NNUE/64 scale
     const ADJUDICATE_COUNT: usize = 4; // consecutive plies
 
     let mut adjudicate_counter = 0usize;
@@ -109,7 +241,7 @@ fn play_game(
         let num_moves = board.valid_moves_array(&mut moves);
         if num_moves == 0 { break; }
 
-        if ply < RANDOM_PLIES {
+        if ply < random_plies {
             // Random move for opening diversity
             let idx = rng.range(num_moves);
             board.make_move(moves[idx]);
@@ -121,10 +253,14 @@ fn play_game(
         // Search from current position
         let result = searcher.search(&board, search_depth, search_time_ms);
 
-        // Scale and clamp eval to trainable range
-        let raw_score = result.score;
+        // Label: HCE static eval (for hybrid mode) or search score
+        let raw_score = if use_hce_labels {
+            evaluate(&board)
+        } else {
+            result.score
+        };
         let eval = (raw_score as f64 * eval_scale).clamp(-3000.0, 3000.0) as i16;
-        if raw_score.abs() < 50000 {
+        if result.score.abs() < 50000 {
             positions.push((board, eval));
         }
 
@@ -173,26 +309,12 @@ fn play_game(
 }
 
 /// Run data generation
-pub fn run_datagen(num_games: u32, depth: i32, time_ms: u64, num_threads: u32, nnue: Option<NnueNetwork>, output_prefix: &str) {
+pub fn run_datagen(num_games: u32, depth: i32, time_ms: u64, num_threads: u32, nnue: Option<NnueNetwork>, output_prefix: &str, use_hce_labels: bool, endgame: bool, starts_file: Option<&str>) {
     let has_nnue = nnue.is_some();
 
-    // Auto-detect eval scale: search starting position, target mean_abs ~500
-    let eval_scale = if has_nnue {
-        let mut calibration_searcher = Searcher::new(4);
-        calibration_searcher.silent = true;
-        if let Some(ref net) = nnue {
-            calibration_searcher.set_nnue(net.clone());
-        }
-        let board = Board::new();
-        let result = calibration_searcher.search(&board, depth, time_ms);
-        let abs_score = result.score.unsigned_abs().max(1) as f64;
-        let target_abs = 500.0;
-        let scale = (target_abs / abs_score).min(1.0); // never amplify, only shrink
-        eprintln!("Eval calibration: start_pos score={}, scale={:.4}", result.score, scale);
-        scale
-    } else {
-        1.0
-    };
+    // With NNUE/64 normalization, search scores are already in centipawn-like scale.
+    // No scaling needed — store raw search scores as training evals.
+    let eval_scale = 1.0;
 
     println!("NNUE Training Data Generation");
     println!("=============================");
@@ -200,6 +322,23 @@ pub fn run_datagen(num_games: u32, depth: i32, time_ms: u64, num_threads: u32, n
     println!("Search: depth {} / {}ms", depth, time_ms);
     println!("Threads: {}", num_threads);
     println!("Eval: {}", if has_nnue { "NNUE" } else { "Handcrafted" });
+    if use_hce_labels {
+        println!("Labels: HCE static eval (hybrid mode)");
+    }
+    if endgame {
+        println!("Mode: ENDGAME (random endgame starting positions, 3-50 stones)");
+    }
+
+    // Load expert starting positions if provided
+    let expert_starts: Arc<Vec<Board>> = Arc::new(match starts_file {
+        Some(path) => {
+            let starts = load_starting_positions(path);
+            println!("Mode: EXPERT STARTS ({} positions from {})", starts.len(), path);
+            starts
+        }
+        None => Vec::new(),
+    });
+
     println!("Eval scale: {:.4}", eval_scale);
     println!("Output prefix: {}", output_prefix);
     println!();
@@ -218,6 +357,7 @@ pub fn run_datagen(num_games: u32, depth: i32, time_ms: u64, num_threads: u32, n
         let stop = stop.clone();
         let nnue_clone = nnue.clone();
         let prefix = prefix.clone();
+        let expert_starts = expert_starts.clone();
         let games_per_thread = num_games / num_threads
             + if thread_id < num_games % num_threads { 1 } else { 0 };
 
@@ -238,7 +378,7 @@ pub fn run_datagen(num_games: u32, depth: i32, time_ms: u64, num_threads: u32, n
                     break;
                 }
 
-                let records = play_game(&mut searcher, depth, time_ms, &mut rng, false, eval_scale);
+                let records = play_game(&mut searcher, depth, time_ms, &mut rng, false, eval_scale, use_hce_labels, endgame, &expert_starts);
                 local_positions += records.len() as u64;
 
                 for record in &records {

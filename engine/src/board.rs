@@ -274,6 +274,28 @@ impl Board {
     pub fn stones_on_side(&self, side: Side) -> u16 {
         self.pits[side.index()].iter().map(|&x| x as u16).sum()
     }
+
+    /// Total stones on the board (both sides' pits, not kazans)
+    #[inline]
+    pub fn total_board_stones(&self) -> u16 {
+        self.stones_on_side(Side::White) + self.stones_on_side(Side::Black)
+    }
+
+    /// Create board from raw parts (for EGTB generation)
+    pub fn from_parts(
+        pits: [[u8; NUM_PITS]; 2],
+        kazan: [u8; 2],
+        tuzdyk: [i8; 2],
+        side_to_move: Side,
+    ) -> Self {
+        Board {
+            pits,
+            kazan,
+            tuzdyk,
+            side_to_move,
+            move_count: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

@@ -270,14 +270,19 @@ body {
     letter-spacing: 1px;
 }
 .stones-col {
-    display: flex;
-    flex-wrap: wrap-reverse;
-    align-content: flex-start;
-    justify-content: center;
-    gap: 2px;
+    position: relative;
     width: 100%;
     flex: 1;
-    padding: 4px 4px 0 4px;
+    overflow: hidden;
+}
+.stone-layer {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 2px;
+    justify-items: center;
+    padding: 0 5px;
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
 }
 .stone {
     border-radius: 50%;
@@ -890,7 +895,7 @@ function renderBoard(b) {
 
     for(let i=8;i>=0;i--){
         blackRow.appendChild(createPit(1,i,b,isLive));
-        const l=document.createElement('div'); l.className='pit-label'; l.textContent=9-i; bLabels.appendChild(l);
+        const l=document.createElement('div'); l.className='pit-label'; l.textContent=i+1; bLabels.appendChild(l);
     }
     for(let i=0;i<9;i++){
         whiteRow.appendChild(createPit(0,i,b,isLive));
@@ -922,11 +927,11 @@ function renderBoard(b) {
 
 function renderKazanStones(id, count) {
     const c=document.getElementById(id); c.innerHTML='';
-    const max=Math.min(count,50);
-    const sz=count<=20?11:count<=40?8:6;
-    for(let i=0;i<max;i++){
+    const show=Math.min(count,10);
+    const SZ=11;
+    for(let i=0;i<show;i++){
         const s=document.createElement('div'); s.className='stone';
-        s.style.width=sz+'px'; s.style.height=sz+'px'; c.appendChild(s);
+        s.style.width=SZ+'px'; s.style.height=SZ+'px'; c.appendChild(s);
     }
 }
 
@@ -949,15 +954,31 @@ function createPit(side, idx, b, isLive) {
     }
 
     const sc=document.createElement('div'); sc.className='stones-col';
-    const ah=120, rows=Math.ceil(stones/2);
-    let sz,dc;
-    if(stones===0){dc=0;sz=16;}
-    else if(rows<=6){sz=Math.max(10,Math.min(18,Math.floor(ah/rows)-3));dc=stones;}
-    else if(rows<=10){sz=Math.max(8,Math.floor(ah/rows)-2);dc=stones;}
-    else{sz=7;dc=Math.min(stones,Math.floor(ah/(sz+2))*2);}
-    for(let s=0;s<dc;s++){
-        const st=document.createElement('div'); st.className='stone';
-        st.style.width=sz+'px'; st.style.height=sz+'px'; sc.appendChild(st);
+    const SZ=22; // fixed stone size
+    const PER_LAYER=10; // 2 columns × 5 rows per layer
+    const GAP=2;
+    const LAYER_SHIFT=4; // px shift upward per extra layer
+    const numLayers=Math.ceil(stones/PER_LAYER)||0;
+    for(let layer=0;layer<numLayers;layer++){
+        const layerDiv=document.createElement('div'); layerDiv.className='stone-layer';
+        // Each layer is absolute, positioned from bottom with increasing offset
+        layerDiv.style.bottom=(layer*LAYER_SHIFT)+'px';
+        layerDiv.style.zIndex=layer;
+        if(layer>0){
+            layerDiv.style.left=(layer*2)+'px';
+        }
+        const inLayer=Math.min(PER_LAYER, stones - layer*PER_LAYER);
+        const isTop=(layer===numLayers-1);
+        for(let s=0;s<inLayer;s++){
+            const st=document.createElement('div'); st.className='stone';
+            st.style.width=SZ+'px'; st.style.height=SZ+'px';
+            if(!isTop){
+                // Darken lower layers
+                st.style.filter='brightness(0.55)';
+            }
+            layerDiv.appendChild(st);
+        }
+        sc.appendChild(layerDiv);
     }
     div.appendChild(sc);
     const cn=document.createElement('div'); cn.className='stone-count'; cn.textContent=stones; div.appendChild(cn);
