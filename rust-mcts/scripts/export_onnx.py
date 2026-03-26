@@ -55,6 +55,7 @@ def export_onnx(checkpoint_path: str, output_path: str, model_size: str = "mediu
             'log_policy': {0: 'batch'},
             'value': {0: 'batch'},
         },
+        dynamo=False,
     )
 
     size_mb = os.path.getsize(output_path) / 1e6
@@ -74,7 +75,7 @@ def main():
     parser = argparse.ArgumentParser(description="Export TogyzNet to ONNX")
     parser.add_argument("checkpoint", help="Path to PyTorch checkpoint (.pt)")
     parser.add_argument("--output", "-o", default="model.onnx", help="Output ONNX file")
-    parser.add_argument("--model-size", default="medium", choices=["small", "medium", "large"])
+    parser.add_argument("--model-size", default="medium", choices=["small", "medium", "large", "large2m"])
     args = parser.parse_args()
 
     export_onnx(args.checkpoint, args.output, args.model_size)

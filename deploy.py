@@ -4,9 +4,9 @@ import paramiko
 import os
 import sys
 
-HOST = '5.129.198.203'
+HOST = '85.239.36.121'
 USER = 'root'
-PASS = 'j2EYHhU+eAheZm'
+PASS = 'eWNvr3_r,D4-r3'
 REMOTE_DIR = '/opt/togyzkumalaq'
 
 def main():

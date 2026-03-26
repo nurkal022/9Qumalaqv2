@@ -36,7 +36,7 @@ const NULL_MOVE_R: i32 = 2;
 const LMR_THRESHOLD: usize = 2; // reduce moves after this many (0-indexed)
 
 /// Aspiration window initial delta (calibrated for NNUE/64 scale)
-const ASP_DELTA: i32 = 20;
+const ASP_DELTA: i32 = 35;
 
 /// Reverse Futility Pruning margins per depth (calibrated for NNUE/64 scale)
 const RFP_MARGIN: i32 = 70;
@@ -948,6 +948,23 @@ impl Searcher {
             }
         }
 
+        // === TT PROBE IN QUIESCENCE ===
+        let hash = self.zobrist.hash(board);
+        if let Some(entry) = self.tt.probe(hash) {
+            // In qsearch, depth=0 entries are always valid
+            if entry.depth >= 0 {
+                match entry.flag {
+                    TTFlag::Exact => return entry.score,
+                    TTFlag::LowerBound => {
+                        if entry.score >= beta { return entry.score; }
+                    }
+                    TTFlag::UpperBound => {
+                        if entry.score <= alpha { return entry.score; }
+                    }
+                }
+            }
+        }
+
         let stand_pat = self.eval(board);
 
         if stand_pat >= beta {
@@ -962,14 +979,49 @@ impl Searcher {
         }
 
         // Endgame qsearch: search ALL moves (not just captures) for better tactical vision
-        // Games are decided at ~45-60 stones — we need accurate qsearch here
         // ≤30 stones: first 2 ply all-moves (light), ≤15 stones: first 4 ply (deep)
         let total_board_stones: u16 = board.pits[0].iter().map(|&x| x as u16).sum::<u16>()
             + board.pits[1].iter().map(|&x| x as u16).sum::<u16>();
-        let qsearch_all_moves = total_board_stones <= 15 && qs_depth < 4;
+        let qsearch_all_moves = (total_board_stones <= 15 && qs_depth < 4)
+            || (total_board_stones <= 30 && qs_depth < 2);
 
         let mut moves = [0usize; NUM_PITS];
         let num_moves = board.valid_moves_array(&mut moves);
+
+        // === QSEARCH MOVE ORDERING ===
+        // Order captures by expected capture value (MVV-like) for better beta cutoffs
+        let mut move_scores = [0i32; NUM_PITS];
+        for i in 0..num_moves {
+            let m = moves[i];
+            let mut score = 0i32;
+            if self.move_creates_tuzdyk(board, m) {
+                score += 50_000;
+            }
+            if self.is_capture_move(board, m) {
+                let (landing_side, landing_pit) = self.predict_landing(board, m);
+                let opp = board.side_to_move.opposite().index();
+                if landing_side == opp {
+                    score += 10_000 + board.pits[opp][landing_pit] as i32 * 100;
+                }
+            }
+            score += board.pits[board.side_to_move.index()][m] as i32;
+            move_scores[i] = score;
+        }
+        // Selection sort (fast for ≤9 elements)
+        for i in 0..num_moves {
+            let mut best_idx = i;
+            for j in (i + 1)..num_moves {
+                if move_scores[j] > move_scores[best_idx] {
+                    best_idx = j;
+                }
+            }
+            if best_idx != i {
+                moves.swap(i, best_idx);
+                move_scores.swap(i, best_idx);
+            }
+        }
+
+        let mut best_score = stand_pat;
 
         for i in 0..num_moves {
             let m = moves[i];
@@ -992,13 +1044,23 @@ impl Searcher {
                 return 0;
             }
 
+            if score > best_score {
+                best_score = score;
+            }
+
             if score >= beta {
+                // Store in TT as lower bound
+                self.tt.store(hash, 0, score, TTFlag::LowerBound, m as i8);
                 return score;
             }
             if score > alpha {
                 alpha = score;
             }
         }
+
+        // Store best score in TT (fail-hard: return alpha, not best_score)
+        let flag = if best_score > stand_pat { TTFlag::Exact } else { TTFlag::UpperBound };
+        self.tt.store(hash, 0, best_score, flag, -1);
 
         alpha
     }

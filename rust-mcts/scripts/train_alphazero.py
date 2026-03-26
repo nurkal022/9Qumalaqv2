@@ -215,6 +215,7 @@ def export_onnx(model, output_path):
             'log_policy': {0: 'batch'},
             'value': {0: 'batch'},
         },
+        dynamo=False,
     )
     model.to('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Exported ONNX: {output_path}")

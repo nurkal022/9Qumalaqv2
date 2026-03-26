@@ -263,7 +263,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50, help='Training epochs')
     parser.add_argument('--batch-size', type=int, default=2048, help='Batch size')
     parser.add_argument('--lr', type=float, default=0.002, help='Learning rate')
-    parser.add_argument('--model-size', default='medium', choices=['small', 'medium', 'large'])
+    parser.add_argument('--model-size', default='medium', choices=['small', 'medium', 'large2m', 'large'])
     parser.add_argument('--output', default='checkpoints/supervised_pretrained.pt')
     parser.add_argument('--val-split', type=float, default=0.05, help='Validation split ratio')
     args = parser.parse_args()

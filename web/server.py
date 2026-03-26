@@ -8,12 +8,21 @@ import random
 import subprocess
 import threading
 import atexit
+from datetime import datetime
 from flask import Flask, jsonify, request, send_from_directory
 
 app = Flask(__name__)
 
 ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'engine')
 ENGINE_PATH = os.path.join(ENGINE_DIR, 'target', 'release', 'togyzkumalaq-engine')
+
+# Game logging
+GAMES_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'games_log')
+os.makedirs(GAMES_LOG_DIR, exist_ok=True)
+
+# Per-session game state tracking
+game_sessions = {}  # session_id -> {moves: [], positions: [], start_time, ...}
+game_sessions_lock = threading.Lock()
 
 # Persistent engine process
 engine_proc = None
@@ -131,6 +140,54 @@ def lookup_book_move(pos_string):
     return candidates[0][0], {'source': 'book', 'games': candidates[0][2].get('count', 0)}
 
 
+def get_session_id():
+    """Get or create a session ID from request."""
+    return request.headers.get('X-Session-Id', request.remote_addr or 'unknown')
+
+
+def log_game(session_id, result=None):
+    """Save completed game to log file."""
+    with game_sessions_lock:
+        session = game_sessions.pop(session_id, None)
+    if not session or not session.get('moves'):
+        return
+    game_data = {
+        'session_id': session_id,
+        'start_time': session['start_time'],
+        'end_time': datetime.utcnow().isoformat(),
+        'result': result,
+        'moves': session['moves'],
+        'positions': session['positions'],
+        'human_color': session.get('human_color'),
+        'num_moves': len(session['moves']),
+    }
+    # Append to daily log file
+    date_str = datetime.utcnow().strftime('%Y-%m-%d')
+    log_file = os.path.join(GAMES_LOG_DIR, f'games_{date_str}.jsonl')
+    with open(log_file, 'a') as f:
+        f.write(json.dumps(game_data) + '\n')
+    print(f"Game logged: {session_id}, {len(session['moves'])} moves, result={result}")
+
+
+def record_move(session_id, pos, move_info, who):
+    """Record a move in the current session."""
+    with game_sessions_lock:
+        if session_id not in game_sessions:
+            game_sessions[session_id] = {
+                'start_time': datetime.utcnow().isoformat(),
+                'moves': [],
+                'positions': [],
+                'human_color': None,
+            }
+        session = game_sessions[session_id]
+        session['positions'].append(pos)
+        session['moves'].append({
+            'who': who,
+            'position': pos,
+            **move_info,
+        })
+
+
 @app.route('/')
 def index():
     return send_from_directory('.', 'index.html')
@@ -142,11 +199,14 @@ def get_engine_move():
     pos = board_to_pos(data['board'])
     time_ms = data.get('time_ms', 3000)
     use_book = data.get('use_book', True)
+    session_id = get_session_id()
 
     # Try opening book first
     if use_book:
         book_move, book_info = lookup_book_move(pos)
         if book_move is not None:
+            move_info = {'bestmove': book_move, 'source': 'book', 'score': 0, 'depth': 0}
+            record_move(session_id, pos, move_info, 'engine')
             return jsonify({
                 'bestmove': book_move,
                 'score': 0,
@@ -165,6 +225,7 @@ def get_engine_move():
             if response.startswith('terminal'):
                 parts = response.split()
                 result_str = parts[1] if len(parts) > 1 else 'unknown'
+                log_game(session_id, result=result_str)
                 return jsonify({'terminal': True, 'result': result_str})
 
             if response.startswith('bestmove'):
@@ -187,6 +248,7 @@ def get_engine_move():
                     elif key == 'nps':
                         result['nps'] = int(val)
                     i += 1
+                record_move(session_id, pos, result, 'engine')
                 return jsonify(result)
 
             if response.startswith('error'):
@@ -200,6 +262,9 @@ def get_engine_move():
 @app.route('/api/newgame', methods=['POST'])
 def new_game():
     """Reset engine state for a new game."""
+    session_id = get_session_id()
+    # Save previous game if any
+    log_game(session_id, result='abandoned')
     with engine_lock:
         try:
             response = send_command('newgame')
@@ -213,12 +278,30 @@ def push_position():
     """Push a position to engine's game history (after human moves)."""
     data = request.json
     pos = board_to_pos(data['board'])
+    session_id = get_session_id()
+    move_pit = data.get('move_pit')
+    record_move(session_id, pos, {'source': 'human', 'bestmove': move_pit}, 'human')
     with engine_lock:
         try:
             response = send_command(f'position {pos}')
             return jsonify({'status': 'ok'})
         except Exception as e:
             return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/games', methods=['GET'])
+def list_games():
+    """API endpoint to view logged games (for analysis)."""
+    games = []
+    if os.path.exists(GAMES_LOG_DIR):
+        for fname in sorted(os.listdir(GAMES_LOG_DIR), reverse=True):
+            if fname.endswith('.jsonl'):
+                fpath = os.path.join(GAMES_LOG_DIR, fname)
+                with open(fpath) as f:
+                    for line in f:
+                        if line.strip():
+                            games.append(json.loads(line))
+    return jsonify({'total': len(games), 'games': games[-100:]})
 
 
 atexit.register(stop_engine)

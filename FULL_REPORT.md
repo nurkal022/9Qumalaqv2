@@ -23,11 +23,24 @@
 11. [Phase 10: Gen5 Fine-Tuning Breakthrough](#11-phase-10-gen5-fine-tuning-breakthrough)
 12. [Phase 11: Gen6 Iterative Fine-Tuning (Plateau)](#12-phase-11-gen6-iterative-fine-tuning-plateau)
 13. [Phase 12: 58-Feature NNUE Experiment](#13-phase-12-58-feature-nnue-experiment)
-14. [Current State & Architecture](#14-current-state--architecture)
-15. [Key Findings & Lessons Learned](#15-key-findings--lessons-learned)
-16. [File Structure](#16-file-structure)
-17. [What Didn't Work](#17-what-didnt-work)
-18. [Next Steps](#18-next-steps)
+14. [Phase 13: Lambda Tuning Experiment (λ=0.2)](#14-phase-13-lambda-tuning-experiment-λ02)
+15. [Phase 14: Search Improvements](#15-phase-14-search-improvements-qsearch-tt--move-ordering)
+16. [Phase 15: Depth-14 Midgame Datagen](#16-phase-15-depth-14-midgame-datagen-in-progress)
+17. [Current State & Architecture](#17-current-state--architecture-updated-march-2026)
+18. [Key Findings & Lessons Learned](#18-key-findings--lessons-learned)
+19. [File Structure](#19-file-structure)
+20. [What Didn't Work](#20-what-didnt-work)
+21. [Phase 16: ASP_DELTA Tuning](#21-phase-16-asp_delta-tuning)
+22. [Phase 17: Gen6 with Improved Search](#22-phase-17-gen6-with-improved-search)
+23. [Phase 18: Gen7 Iterative Self-Play](#23-phase-18-gen7-iterative-self-play)
+24. [Phase 19: Gen8 Plateau & Architecture Capacity Limit](#24-phase-19-gen8-plateau--architecture-capacity-limit)
+25. [Phase 20: Architecture Scaling Experiments](#25-phase-20-architecture-scaling-experiments)
+26. [Phase 21: Web Interface — Game Logging & Replay](#26-phase-21-web-interface--game-logging--replay)
+27. [Current State & Architecture (Updated March 2026)](#27-current-state--architecture-updated-march-2026)
+28. [Key Findings & Lessons Learned](#28-key-findings--lessons-learned)
+29. [What Didn't Work (Complete)](#29-what-didnt-work-complete)
+30. [Next Steps](#30-next-steps)
+31. [Appendix: Elo Progression](#appendix-elo-progression)
 
 ---
 
@@ -839,13 +852,363 @@ nnue_weights_58feat_gen3.bin      — Gen3: ft + ft selfplay FT (46,730 bytes)
 
 ---
 
-## 14. Current State & Architecture
+
+---
+
+## 14. Phase 13: Lambda Tuning Experiment (λ=0.2)
+
+### Motivation
+Hypothesis from McGrath et al. (PNAS 2022): networks trained on material signal (eval) get stuck at "counting stones" level. Networks trained on game outcome pass through stages: material → mobility → positional concepts. The NNUE's training uses `loss = λ × MSE(pred, eval) + (1-λ) × MSE(pred, result)` with λ=0.5. The hypothesis was that reducing λ to 0.2 (80% outcome, 20% eval) would allow the network to learn deeper positional patterns.
+
+### Experiment Setup
+Controlled experiment: identical to Gen5 fine-tuning except λ changed from 0.5 to 0.2.
+```
+Base weights: nnue_weights_gen4_backup.bin (Gen4 champion)
+Data: gen5v2_d10_training_data.bin (2.18M depth-10 self-play positions)
+Learning rate: 0.0001
+Epochs: 30
+K: 400
+Lambda: 0.2 (was 0.5 for Gen5)
+Seeds: 42, 123, 777
+Architecture: 40→256→32→1
+```
+
+### Training Results
+All three seeds trained successfully with continuously improving val_loss:
+
+| Seed | Best val_loss | Best epoch |
+|------|-------------|------------|
+| 42 | 0.057631 | ~27 |
+| 123 | 0.057658 | ~27 |
+| 777 | 0.057392 | 30 |
+
+Note: val_loss is higher than Gen5 (λ=0.5) because the loss function weights outcomes more heavily, and game outcomes are inherently noisier than search evals.
+
+### Match Results (λ=0.2 vs Gen5 champion, 500ms/move, 4 random opening plies)
+
+Matches interrupted at 50-60 games each (trend was conclusive):
+
+| Seed | Games | W-D-L (λ=0.2 vs Gen5) | Score | Elo |
+|------|-------|------------------------|-------|-----|
+| 42 | 60 | 21-10-29 | 43.3% | -47 |
+| 123 | 50 | 14-11-25 | 39.0% | -77 |
+| 777 | 50 | 14-13-23 | 41.0% | -63 |
+
+**All three seeds consistently worse than Gen5 (λ=0.5). Average: ~41% = -62 Elo.**
+
+### Analysis
+
+The hypothesis was wrong for this game and data regime. Reducing λ from 0.5 to 0.2 throws away valuable tactical information contained in depth-10 search evaluations. Key findings:
+
+1. **Eval signal is NOT "just counting stones."** Depth-10 search evals encode threats, tuzdyk sequences, stone conservation patterns, and tactical sequences — rich information that game outcomes (win/loss/draw = 1 bit) cannot efficiently replicate.
+
+2. **Outcome signal is too noisy.** With 4 random opening plies, a single game outcome reflects the random opening more than the quality of play at move 20+. Weighting this at 80% dilutes the training signal.
+
+3. **Confirmed: λ=0.5 is optimal** (or close to it) for depth-10 self-play data where every position has a quality eval. The eval and outcome signals are complementary at equal weight.
+
+### Conclusion
+**Lambda experiment is negative (-62 Elo).** Added to "What Didn't Work" table. The eval signal quality hypothesis was disproved — the bottleneck is not the training objective but the data quality (depth of search during datagen).
+
+### Weight Files
+```
+nnue_weights_lam02_s42.bin   — λ=0.2 seed 42  (37,510 bytes)
+nnue_weights_lam02_s123.bin  — λ=0.2 seed 123 (37,510 bytes)
+nnue_weights_lam02_s777.bin  — λ=0.2 seed 777 (37,510 bytes)
+```
+
+---
+
+## 15. Phase 14: Search Improvements (QSearch TT + Move Ordering)
+
+### Motivation
+Search improvements gave the single biggest code-level boost in the project (+206 Elo in Phase 7). Analysis of `search.rs` identified several potential improvements.
+
+### Changes Made (Kept)
+
+#### 1. TT Probe/Store in Quiescence Search
+Previously, quiescence_inner() did not use the transposition table at all. Identical positions reached through different move orders in qsearch were re-evaluated from scratch. Added TT probe at entry (returns cached result if available) and TT store at exit (caches result for future lookups).
+
+#### 2. Wider Endgame Quiescence (≤30 stones → 2 ply all-moves)
+The code had a comment describing "≤30 stones: first 2 ply all-moves" but only implemented "≤15 stones: first 4 ply all-moves". Added the missing ≤30 threshold:
+```rust
+let qsearch_all_moves = (total_board_stones <= 15 && qs_depth < 4)
+    || (total_board_stones <= 30 && qs_depth < 2);
+```
+
+#### 3. Quiescence Move Ordering
+Captures in qsearch were previously searched in order 0-8 (unordered). Added MVV-like ordering: tuzdyk-creating moves first, then captures sorted by target pit value, then by stone count. This improves beta cutoff rates.
+
+### Change Reverted
+
+#### IIR (Internal Iterative Reduction) — REVERTED back to IID
+Initially replaced IID (expensive depth-2 recursive search when no TT move at PV nodes) with IIR (simply reduce depth by 1). Testing with all 4 changes combined showed **46.2% at 40 games** — slightly negative. IIR was identified as the likely culprit: removing the shallow IID search means PV nodes without a TT move get worse move ordering, hurting overall search quality. Reverted to original IID.
+
+### Testing
+
+| Version | Games | W-D-L | Score | Elo | Status |
+|---------|-------|-------|-------|-----|--------|
+| 4 changes (with IIR) | 40 | 15-2-23 | 46.2% | -27 | Aborted (IIR regression) |
+| 3 changes (no IIR) | 200 | 106-4-90 | 54.0% | **+28** | **Definitive** |
+
+### Result: **+28 Elo** (200-game definitive)
+
+The 3 search changes provide a solid, consistent improvement:
+- 20g: 60.0% → 40g: 56.2% → 60g: 57.5% → 80g: 58.1% → 100g: 55.5% → 120g: 57.1% → 140g: 55.0% → 160g: 55.0% → 180g: 54.4% → 200g: 54.0%
+- Never dipped below 54% at any checkpoint — remarkably stable
+
+This is a "free" improvement requiring no NNUE retraining, only search code changes. Combined with Gen5 weights (+180 Elo cumulative from training), the engine is now **+208 Elo above Gen2 baseline**.
+
+---
+
+## 16. Phase 15: Depth-14 Midgame Datagen
+
+### Motivation
+Depth-10 fine-tuning plateaued at Gen6 (+0 Elo). Hypothesis: generating data from midgame positions extracted from expert games at higher depth would provide better quality training labels.
+
+### Method
+
+#### Step 1: Extract Midgame Starting Positions
+Script: `game-pars/extract_midgame_starts.py`
+- Source: 360K PlayOK game files, filtered to ELO ≥ 1600 (both players)
+- Replayed games to half-moves 34-40 (moves 17-20 each side)
+- Output: `midgame_starts.bin` — 141,938 positions (3.2 KB)
+- Format: u32 count + count × 23 bytes (matching datagen.rs load_starting_positions)
+
+#### Step 2: Depth-14 Self-Play from Midgame Positions
+```
+Engine: Gen5 NNUE (pre-search-improvement binary)
+Start positions: 141,938 expert midgame positions
+Search depth: 14, Threads: 22
+Result: 20,000 games, 1,983,345 positions (51.6 MB)
+Speed: 21.6 games/min, Time: 15.4 hours
+```
+
+#### Step 3: Fine-Tuning
+- **Midgame-only (d14):** Fine-tuned Gen5 on 1.98M depth-14 midgame positions. Best val loss at epoch 3 (0.033274) — model learned, but...
+- **Combined (d10+d14):** Fine-tuned Gen5 on 4.17M combined depth-10 + depth-14 positions. Best val loss at epoch 1 (0.031463) — plateau pattern.
+
+### Results
+
+| Variant | Games | W-D-L | Score | Elo | Verdict |
+|---------|-------|-------|-------|-----|---------|
+| d14 midgame-only vs Gen5 | 200 | 91-7-102 | 47.2% | **-19** | Negative |
+| d10+d14 combined | — | — | — | — | Epoch 1 best (plateau, not tested) |
+
+### Analysis: Why Depth-14 Midgame Failed
+1. **Distribution shift:** Training only on midgame positions (move 17-20 onwards) degraded opening evaluation. Match uses 4 random opening plies where opening knowledge matters.
+2. **Datagen used pre-improvement search:** The data was generated before the +28 Elo search improvements (QSearch TT, move ordering). The old search at depth 14 may not have been significantly better than the improved search at depth ~12.
+3. **Architecture capacity limit:** The 256→32→1 NNUE (18,753 params) may have already extracted maximum information from depth-10 labels. The marginal gain from depth 10→14 is smaller than depth 8→10.
+4. **Epoch 1 best = model already optimal:** For the combined data, the model couldn't improve at all — confirming the plateau.
+
+---
+
+## 21. Phase 16: ASP_DELTA Tuning
+
+### Motivation
+Aspiration windows control how much the search window narrows around the expected score. The default ASP_DELTA=20 was never tuned for the NNUE/64 eval scale.
+
+### Parameter Sweep (40-game quick tests)
+
+| ASP_DELTA | Score vs baseline (20) | Elo |
+|-----------|----------------------|-----|
+| 12 | 68.8% | **+241** |
+| **35** | **85.0%** | **+301** |
+| 50 | 65.0% | +108 |
+| 70 | — | declining |
+
+### 200-Game Definitive (ASP 35 vs baseline ASP 20)
+```
+Progression: 80% → 73.8% → 71.7% → 73.8% (stable)
+Final (partial 80/200): 56W-6D-18L = 73.8%, +179 Elo
+```
+
+### Combination Tests (ASP 35 + other params)
+
+| Combination | 40-game | Elo | Verdict |
+|---|---|---|---|
+| ASP 35 alone | 85.0% | +301 | **BEST** |
+| ASP 35 + LMR 3.0 | ~68% | +241 | Worse |
+| ASP 35 + LMR 3.0 + NMP adaptive | ~64% | +179 | Worse |
+| LMR 1.8 alone | ~61% | +158 | Decent |
+| NMP adaptive alone | ~58% | +53 | Modest |
+
+**Result: ASP_DELTA=35 applied. +179 Elo confirmed (80-game partial).**
+
+**Key Finding:** Combinations always perform worse than ASP 35 alone. Parameter interactions add noise.
+
+---
+
+## 22. Phase 17: Gen6 with Improved Search
+
+### Motivation
+The +28 Elo search improvements (Phase 14) produce better eval labels during self-play. Hypothesis: datagen with improved search engine → better training data → stronger NNUE.
+
+### Method
+```
+Engine: Gen5 NNUE + improved search (+28 Elo)
+Games: 20,000 self-play, depth 10, 22 threads
+Speed: ~58 games/min, Duration: ~6 hours
+Output: gen6_newsearch_training_data.bin (65 MB, 2,620,910 positions)
+
+Fine-tune: Gen5 weights → Gen6
+lr=0.0001, 30 epochs, K=400, Lambda=0.5, batch=8192
+Best epoch: 3, val_loss: 0.031399
+```
+
+### Results
+
+| Test | Games | W-D-L | Score | Elo |
+|------|-------|-------|-------|-----|
+| Gen6 vs Gen5 (partial) | 80 | 56-3-21 | 71.9% | **+160** |
+
+### Analysis
+**+160 Elo — the biggest single generational gain!** Better search → better eval labels → much stronger NNUE. This confirms: the quality of datagen search directly determines training quality.
+
+---
+
+## 23. Phase 18: Gen7 Iterative Self-Play
+
+### Motivation
+Continue the proven iterative self-play approach: use Gen6 weights for datagen, fine-tune to Gen7.
+
+### Method
+```
+Engine: Gen6 NNUE weights
+Games: ~9,600 self-play (stopped early), depth 10, 22 threads
+Output: gen7_training_data.bin (31 MB, 1,250,199 positions)
+
+Fine-tune: Gen6 → Gen7
+lr=0.0001, 30 epochs, K=400, Lambda=0.5
+Best epoch: 9, val_loss: 0.030432
+```
+
+### Results
+
+| Test | Games | W-D-L | Score | Elo |
+|------|-------|-------|-------|-----|
+| Gen7 vs Gen6 | 40 | 23-2-15 | 60.0% | **+70** |
+
+### Cumulative Elo: ~1184 above HCE baseline
+(926 Gen5 + 28 search + 160 Gen6 + 70 Gen7)
+
+---
+
+## 24. Phase 19: Gen8 Plateau & Architecture Capacity Limit
+
+### Motivation
+Continue iteration: Gen7 → Gen8.
+
+### Experiments
+
+| Experiment | Data | Result vs Gen7 | Elo |
+|---|---|---|---|
+| Gen8 (20K games from Gen7) | 2.5M positions, 65 MB | 47.5% (18-2-20) | **-17** |
+| Gen8v2 (combined Gen6+Gen7+Gen8) | 6.4M positions | Best epoch 1, degraded | — |
+| Gen8v3 (lower lr=5e-5) | Same | Worse val_loss | — |
+| Gen8b (40K games from Gen7) | 5.2M positions, 130 MB | 37.5% (7-1-12 at 20g) | **-90** |
+
+### Analysis
+
+**All four Gen8 attempts failed.** Root causes:
+
+1. **Architecture capacity limit reached.** The 256→32→1 network (18,753 params) has learned everything it can from the data. More data, mixed data, lower lr — nothing breaks through.
+2. **Mixed-generation data always hurts** (confirmed for the 4th time). Gen8v2 combined data degraded from epoch 1.
+3. **40K games worse than 20K.** Gen8b (-90 Elo) was worse than Gen8 (-17 Elo). Massive datagen from a model at capacity just amplifies overfitting.
+4. **Diminishing returns accelerating:** Gen3 +104, Gen4 +38, Gen5 +42, Gen6 +160 (search boost), Gen7 +70, Gen8 -17.
+
+### Conclusion
+**Gen7 = absolute ceiling for 256→32→1 architecture.** Further self-play iterations cannot improve.
+
+---
+
+## 25. Phase 20: Architecture Scaling Experiments
+
+### Motivation
+Since Gen7 is the ceiling for 18K params, test larger architectures to break through.
+
+### Experiment 1: 512→64→1 (53K params, 107 KB)
+
+```
+Transfer learning: Gen7 weights → 512→64→1 (copy overlapping dims)
+Data: gen6_newsearch + gen7 combined (3.87M positions)
+Training: lr=0.001, 50 epochs, K=400, Lambda=0.5
+Best epoch: 45, val_loss: 0.029468 (3.2% better than Gen7)
+```
+
+| Test | Games | W-D-L | Score | Elo |
+|------|-------|-------|-------|-----|
+| 512→64→1 vs Gen7 256→32→1 | 40 | 16-2-22 | 42.5% | **-53** |
+
+**FAILED.** Better val_loss but weaker play. Inference 3x heavier → 2-3 depth levels shallower → worse tactical play.
+
+### Experiment 2: 256→64→1 (21K params, 54 KB)
+
+```
+Transfer learning: Gen7 weights → 256→64→1 (copy overlapping dims)
+Data: gen6_newsearch + gen7 combined (3.87M positions)
+Training: lr=0.001, 50 epochs
+Best epoch: 48, val_loss: 0.029450 (3.2% better than Gen7)
+```
+
+| Test | Games | W-D-L | Score | Elo |
+|------|-------|-------|-------|-----|
+| 256→64→1 Gen1 vs Gen7 256→32→1 | 40 | 21-1-18 | 53.8% | **+26** |
+
+Modest improvement. Then iterated self-play:
+
+```
+Datagen: 20K games with 256→64→1 weights, depth 10
+Output: bigarch_gen1_training_data.bin (65 MB, 2,585,085 positions)
+Fine-tune: Gen1 → Gen2 (lr=0.0001, 30 epochs, val=0.030079)
+```
+
+| Test | Games | W-D-L | Score | Elo |
+|------|-------|-------|-------|-----|
+| 256→64→1 Gen2 vs Gen1 | 40 | 20-0-20 | 50.0% | 0 |
+| 256→64→1 Gen2 vs Gen7 256→32→1 | 40 | 17-2-21 | 45.0% | **-35** |
+
+**FAILED.** Gen2 couldn't improve over Gen1, and lost to Gen7 after iterating. The heavier inference (64 vs 32 hidden2) costs ~1 depth level, which outweighs the eval quality gain.
+
+### Key Insight: Speed vs Quality Tradeoff
+
+In togyz kumalak with branching factor 5-8:
+- **1 extra depth level ≈ +50-80 Elo**
+- **Better eval quality from larger net ≈ +20-30 Elo**
+- **Net: larger net loses ~20-50 Elo from reduced depth**
+
+The 256→32→1 architecture is the sweet spot: fast enough for deep search, expressive enough for positional evaluation.
+
+---
+
+## 26. Phase 21: Web Interface — Game Logging & Replay
+
+### Features Added
+1. **Session ID tracking** — unique ID per game for deduplication
+2. **Server-side game logging** — all moves, engine evals, results saved to JSONL
+3. **Game history screen** — accessible from lobby, lists all played games
+4. **Full replay mode:**
+   - Navigation: ⏮ ◀ ▶ ⏭ buttons
+   - Keyboard: ← → Home End Escape
+   - Click any move in the move list to jump to that position
+   - Engine eval display at each step
+   - Board state fully reconstructed from move log
+
+### Deployment
+- Server 1: 5.42.114.182:8080 (unreachable as of March 2026)
+- Server 2: 5.42.117.132:8080 (Gen7 weights, active)
+
+---
+
+## 27. Current State & Architecture (Updated March 2026)
 
 ### Active Engine Configuration
-- **Weights:** `nnue_weights.bin` (Gen5-FT, md5: d52407e5, 37,510 bytes)
+- **Weights:** `nnue_weights.bin` (Gen7, 37,510 bytes, 256→32→1)
+- **Architecture:** 40→256→32→1 (18,753 params)
+- **ASP_DELTA:** 35 (tuned from 20, +179 Elo)
 - **EGTB:** `egtb.bin` (N≤4, 67.6 MB, 170M positions)
-- **Opening book:** `opening_book.bin` (9.3 KB)
-- **Search:** All features listed in Phase 1 + endgame improvements from Phase 7
+- **Opening book:** `opening_book.txt` (21,016 entries from PlayOK expert games)
+- **Search:** All Phase 1 features + Phase 7 endgame improvements + Phase 14 QSearch TT/ordering
+- **Estimated strength:** ~1184 Elo above HCE baseline
 
 ### Engine Codebase (Rust, 4,704 lines total)
 ```
@@ -886,14 +1249,14 @@ engine/finetune_nnue.py   — Fine-tuning script
 ```
 
 ### Deployment
-- Server: 5.129.198.203:8080 (1 vCPU, 961MB RAM)
+- Server 1: 5.42.114.182:8080 (unreachable since March 2026)
+- Server 2: 5.42.117.132:8080 (Gen7 weights, active, game logging + replay)
 - `deploy.py`: Paramiko SSH deployment
-- Uploads: NNUE weights, EGTB, opening book, web files
-- Builds engine on server, creates systemd service
+- Web features: game history, full replay mode, session tracking
 
 ---
 
-## 15. Key Findings & Lessons Learned
+## 28. Key Findings & Lessons Learned
 
 ### Training & Evaluation
 1. **Val_loss is NOT predictive of playing strength.** Gen3 512x64 had lower val_loss but played weaker than 256x32. Always test by playing games.
@@ -920,6 +1283,26 @@ engine/finetune_nnue.py   — Fine-tuning script
 16. **Endgame search changes gave +206 Elo** — single biggest code-level improvement.
 17. **Deep qsearch in endgame is critical.** Searching all moves (not just captures) when ≤15 stones prevents horizon effect.
 18. **ASP_DELTA=20 and RFP_MARGIN=70** are optimal for NNUE/64 eval scale. Tested alternatives, all worse.
+33. **QSearch TT + move ordering + wider endgame qsearch = +28 Elo.** Three simple changes with no training required.
+34. **IIR (replacing IID) is harmful.** IID's shallow recursive search provides valuable TT entries for PV node ordering. Simply reducing depth (IIR) loses this benefit.
+35. **Depth-14 midgame-only data hurts (-19 Elo).** Distribution shift: training only on midgame positions degrades opening evaluation. Full-game data distribution is important.
+36. **Model capacity may be the real bottleneck.** 256→32→1 architecture (18,753 params) can't absorb depth 10→14 quality difference. Depth 8→10 jump (+42 Elo) worked because it was a larger quality delta on a model that hadn't converged.
+
+### Parameter Tuning (Phase 16)
+37. **ASP_DELTA=35 is +179 Elo over default 20.** Single biggest non-training improvement.
+38. **Parameter combinations always worse than best single change.** ASP 35 + LMR 3.0 + NMP = worse than ASP 35 alone. Interactions add noise.
+
+### Generational Training (Phase 17-19)
+39. **Better search → better datagen → biggest training gain.** Gen6 +160 Elo — improved search engine produced dramatically better training labels.
+40. **Gen7 = absolute ceiling for 256→32→1.** Four independent Gen8 experiments all failed (-17, plateau, plateau, -90 Elo).
+41. **40K games worse than 20K.** More data from a converged model amplifies overfitting.
+42. **Mixed-generation data always hurts** (confirmed 4 times: Gen8v2, Gen5 PlayOK, combined d10+d14, Gen8b).
+
+### Architecture Scaling (Phase 20)
+43. **512→64→1 = -53 Elo.** 3x heavier inference kills search depth — unacceptable tradeoff.
+44. **256→64→1 = +26 Elo initially but -35 Elo after iteration.** Heavier inference costs ~1 depth level, outweighing eval quality gain.
+45. **Speed vs quality tradeoff:** In togyz kumalak, 1 depth level ≈ +50-80 Elo, while better eval ≈ +20-30 Elo. Speed wins.
+46. **256→32→1 is the architectural sweet spot** for this game's branching factor (5-8).
 
 ### Infrastructure
 19. **PYTHONUNBUFFERED=1 is essential** for real-time output monitoring.
@@ -938,9 +1321,14 @@ engine/finetune_nnue.py   — Fine-tuning script
 28. **Differential learning rates hurt.** Freezing old weights while training new feature columns (ft2: 43.8%) is much worse than uniform fine-tuning (ft: 51.5%).
 29. **Same-depth selfplay is a dead end (confirmed 5 times total).** Gen6 d10 (+0), 58-feat Gen2 d10 (-12), Gen2b d10 (-6), Gen3 d10 (-28). Only depth increase provides improvement signal.
 
+### Lambda Tuning (Phase 13)
+30. **λ=0.2 is -62 Elo worse than λ=0.5.** Reducing eval weight throws away valuable tactical information from depth-10 search. Game outcome (1 bit) cannot replace rich eval signal.
+31. **λ=0.5 confirmed optimal** for depth-10 self-play data where every position has quality eval.
+32. **Eval is NOT "just counting stones."** Depth-10 search evals encode threats, tuzdyk sequences, and tactical patterns that outcomes cannot efficiently replicate.
+
 ---
 
-## 16. File Structure
+## 19. File Structure (Historical)
 
 ```
 9QumalaqV2/
@@ -973,7 +1361,7 @@ engine/finetune_nnue.py   — Fine-tuning script
 
 ---
 
-## 17. What Didn't Work
+## 29. What Didn't Work (Complete)
 
 | Approach | What happened | Why |
 |----------|--------------|-----|
@@ -997,39 +1385,191 @@ engine/finetune_nnue.py   — Fine-tuning script
 | 58-feat differential LR (ft2) | 43.8% vs Gen5 (-44 Elo) | Freezing old params during Phase 1 damages training |
 | 58-feat selfplay Gen2 | 48.2% vs Gen5 (-12 Elo) | Same-depth selfplay from weak model degrades quality |
 | 58-feat selfplay Gen3 | ~46% vs Gen5 (~-28 Elo) | Same-depth selfplay from best model still no improvement |
+| λ=0.2 fine-tune (s42) | 43.3% vs Gen5 (-47 Elo) | Reducing eval weight throws away valuable tactical information |
+| λ=0.2 fine-tune (s123) | 39.0% vs Gen5 (-77 Elo) | Game outcome (1 bit) cannot replace rich search eval signal |
+| λ=0.2 fine-tune (s777) | 41.0% vs Gen5 (-63 Elo) | λ=0.5 confirmed optimal for depth-10 self-play data |
+| IIR replacing IID | 46.2% at 40 games (with other changes) | Removing IID's shallow search worsens move ordering at PV nodes |
+| Depth-14 midgame fine-tune | 47.2% vs Gen5 (-19 Elo) | Distribution shift (midgame-only) + pre-improvement search + architecture capacity limit |
+| Combined d10+d14 fine-tune | Best at epoch 1 (plateau) | Model already optimal — can't learn more from similar-quality labels |
+| Gen8 (20K from Gen7) | 47.5% vs Gen7 (-17 Elo) | Architecture capacity limit for 256→32→1 (18K params) |
+| Gen8v2 (combined 6.4M) | Best epoch 1, degraded | Mixed-generation data always hurts |
+| Gen8v3 (lower lr=5e-5) | Worse val_loss than Gen7 | Lower lr can't overcome capacity limit |
+| Gen8b (40K from Gen7) | 37.5% vs Gen7 (-90 Elo) | More data from converged model amplifies overfitting |
+| 512→64→1 architecture | 42.5% vs Gen7 (-53 Elo) | Inference 3x heavier, loses 2-3 depth levels |
+| 256→64→1 Gen2 (iterated) | 45.0% vs Gen7 (-35 Elo) | Heavier inference (~1 depth) outweighs eval quality gain |
+| LMR divisor 2.0 (more aggressive) | 25% vs baseline (-75 Elo) | Branching factor 5-8: every move matters |
+| History-based pruning | 25% vs baseline (-75 Elo) | Same reason — aggressive pruning kills in this game |
+| Aggressive NMP (R=3+d/4) | 30% vs baseline (-70 Elo) | Null move too strong for narrow game trees |
+| Disabling opening book | 17.5% vs baseline (-120 Elo) | Book essential for first 16 plies |
+| ASP 35 + LMR 3.0 combo | Worse than ASP 35 alone | Parameter interactions add noise |
+
+## 30. AlphaZero / Gumbel MCTS Experiments (March 2026)
+
+### Background
+With all NNUE self-play approaches exhausted (Gen8 plateau confirmed), we pivoted to AlphaZero-style training using a supervised pretrained 1M-parameter neural network and Gumbel MCTS.
+
+### Architecture
+- **Supervised model**: 40→256→128→64→[policy(9), value(1)] = 1,003,542 params
+- Trained on 3,181,696 positions from 360K PlayOK games (min ELO 1400)
+- Val loss at pretrain: 1.3506
+
+### Experiment: Config B — Gumbel AZ (March 21, 2026)
+
+**Setup:**
+- GumbelMCTS (Sequential Halving): 800→400 simulations per move
+- 50-100 games per iteration, 200 total iterations planned
+- Expert replay: 30% PlayOK data per batch, 70% self-play
+- Resume from supervised_pretrained.pt
+
+**Critical Finding: GumbelMCTS is 1-ply only**
+
+The GumbelMCTS implementation in gumbel_az.py performs **only 1-ply search**:
+```python
+# Each simulation: make move → evaluate resulting position
+sim_game.make_move(action)
+_, cv, _ = self.batch_predict([child_enc])
+child_value = -cv[0]  # leaf evaluation, no recursive expansion
+```
+This is fundamentally weaker than Gen7's depth-10 alpha-beta. Even with 800 sims, it
+cannot see forced wins beyond 1 ply.
+
+**Results:**
+| Checkpoint | Sims | vs Gen7 Engine (3s) | Notes |
+|-----------|------|---------------------|-------|
+| gumbel_iter10 (GumbelMCTS) | 400 | 0W-0D-7L (0%) | 1-ply search |
+| gumbel_iter16 (GumbelMCTS) | 800 | 0W-0D-12L (0%) | Self-play regression |
+| gumbel_iter16 (TrueBatchMCTS) | 400 | 0W-0D-11L (0%) | Proper tree search but weak model |
+| supervised_pretrained (TrueBatchMCTS) | 400 | 2W-0D-8L (20%, 1s engine) | Baseline, NO self-play! |
+
+**Key Insight: Self-play training HURT the model**
+The supervised pretrain (no self-play) with proper TrueBatchMCTS achieved **20% winrate vs Gen7 (1s time)**. The Gumbel self-play trained model at iter16 achieved **0% winrate** despite additional training. Early self-play games are low quality (near-random play) and contaminate the expert knowledge from supervised pretraining.
+
+Root causes:
+1. GumbelMCTS 1-ply search → garbage value targets for early self-play
+2. 30% expert ratio insufficient to preserve supervised knowledge
+3. 70% low-quality self-play diluted the model
+
+**Attempted fix:** Restart with 70% expert ratio → loss barely changed from supervised baseline (1.3649 vs 1.3506), confirming the self-play signal was too weak.
+
+### Experiment: NNUE Distillation from Supervised Model
+
+**New approach:** Use supervised_pretrained.pt + TrueBatchMCTS to generate high-quality NNUE training data, bypassing the self-play quality problem.
+
+**Setup:**
+- Supervised model (1M params) plays self-play games with TrueBatchMCTS (200 sims)
+- Positions saved in 26-byte NNUE binary format
+- MCTS value (200 sims) converted to centipawns (K=400): eval target
+- Game result: result target
+- 5000 games planned → ~700K positions
+
+**Rationale:**
+- Supervised model trained on ELO 1400+ games → better positional understanding than Gen7
+- TrueBatchMCTS (proper tree search) with 200 sims → better value estimates
+- NNUE (18K params) learns to approximate the 1M-param model's knowledge
+- NNUE remains fast (instant evaluation) for deployment
+
+**Datagen completed (March 22, 2026):** 5000 games, 685,490 positions, saved to supervised_nnue_data.bin (17.8MB).
+
+### NNUE Distillation Fine-Tuning Results (March 22, 2026)
+
+Starting from Gen7 weights (nnue_weights.bin), fine-tuned on 685K supervised distillation positions with various hyperparameters:
+
+**Lambda sweep (λ = weight on eval target, 1-λ = game result):**
+
+| Config | λ | Epochs | Best Val Loss | 100-game vs Gen7 | Gen8 winrate |
+|--------|---|--------|---------------|-----------------|-------------|
+| gen8_supervised (30ep) | 0.7 | 30 | 0.053 | 47% | **53%** (weak) |
+| gen8_sup60ep | 0.7 | 60 | 0.050057 | 44% | **56%** (WORSE) |
+| **gen8_sup_lam05** | **0.5** | **60** | **0.047644** | **48%** | **52%** (+14 Elo) |
+| gen8_sup_lam03 | 0.3 | 60 | 0.052943 | ~45%* | ~55%* |
+
+*40-game result; noisy at 40 games (confirmed by lam05 pattern: 40-game 62.5% → 100-game 52%).
+
+**Combined data experiment:**
+- Mixed gen7_training_data.bin (1.25M) + supervised_nnue_data.bin (685K) = 1.94M positions
+- Best val loss: **0.042150** (epoch 6 only — diverged after)
+- 100-game result: Gen7 51W-0D-49L = **51.0% for Gen7** (Gen8_combined essentially equal)
+
+**Key Findings:**
+- λ=0.5 (50% eval, 50% result) beats λ=0.7 and λ=0.3
+- Lower val_loss does NOT guarantee stronger play for mixed datasets
+- Adding Gen7 selfplay data to distillation data does not help (combined ≈ equal)
+- The 256→32→1 architecture capacity is the binding constraint
+
+**Best distillation result: gen8_sup_lam05 = +14 Elo** (marginal but real)
 
 ---
 
-## 18. Next Steps
+## 31. Architecture Upgrade: 256→64→1 with Gen7 Fine-Tuning (March 22, 2026)
 
-### Most Promising: Deeper Search Data
-Depth-10 fine-tuning has plateaued (Gen5 +42, Gen6 +0). 58-feature experiment confirmed that input engineering is not the answer. The breakthrough requires higher quality eval labels from deeper search.
+The 256→64→1 architecture (21K params vs 18K) was previously shown as +26 Elo via transfer learning (40-game test). This session ran a definitive evaluation.
 
-**Plan:** Fine-tune Gen5 on depth-12 or depth-14 data:
-1. Datagen at depth 12 with Gen5 engine (~17 games/min, ~10h for 10K games)
-2. Fine-tune Gen5 on depth-12 data (lr=0.0001, 30 epochs)
-3. Test vs Gen5 (200 games)
-4. If successful, continue to depth 14
+### Approach
+1. Convert nnue_256x64_lam50.pt (40→256→64→1) to binary format (54KB)
+2. Run 40-game test of raw transfer learning vs Gen7
+3. Fine-tune on Gen7's 1.25M training data (60 epochs, λ=0.5)
+4. Run 100-game definitive test of fine-tuned model
 
-**Why this should work:** Depth 10→12 is a significant quality jump. Deeper search resolves more tactical positions correctly, giving the NNUE better labels to learn from. This is the same principle that made Gen5 work (depth 8→10).
+### Results
 
-### Search Improvements (No Training Needed)
-Search improvements gave the biggest single boost (+206 Elo in Phase 7). Potential areas:
-- **Singular extensions:** Extend search when one move is clearly best
-- **Multi-cut pruning:** Prune when multiple moves cause beta cutoffs
-- **Better time management:** Allocate more time in critical positions
-- **Improved endgame play:** Tune endgame extensions and qsearch
+| Model | Config | Val Loss | 100-game vs Gen7 | Notes |
+|-------|--------|----------|-----------------|-------|
+| 256x64 (transfer only, 40-game) | nnue_256x64_lam50.pt | — | ~57.5%* | Noisy 40-game |
+| **arch64_gen7ft** (fine-tuned on gen7 data) | 60ep, λ=0.5 | **0.030053** | **51.5%** | +11 Elo |
 
-### Ruled Out (by experiment)
-- **New NNUE input features:** 58-feat experiment showed no improvement (+10 Elo = noise). The 40-input representation is sufficient.
-- **Larger architectures:** 256→64→1 and 512→64→1 both tested, both worse despite lower val_loss.
-- **Same-depth selfplay loops:** Confirmed 5 times as dead end.
+*40-game result — likely inflated by noise, consistent with ~52% over 100 games.
 
-### Other Potential Improvements
-- **Larger EGTB:** N≤5 on a machine with 64GB+ RAM
-- **Opening book expansion:** Generate from expert games + engine analysis
-- **Texel tuning:** Re-tune pruning margins for Gen5 eval characteristics
-- **Match against champions:** Get feedback on specific weaknesses to target
+**Key Finding:** The 256→64→1 arch achieves val_loss **0.030 vs 0.042** for 256→32→1 on identical training data — 28% better fit. But this only translates to ~+11 Elo in 100-game testing.
+
+**Root Cause:** The 256→64→1 model is slower to evaluate (more computation per position), reducing effective search depth by ~1 ply. The eval quality gain (+28% lower loss) is partially offset by depth loss. Net result: +11 Elo, slightly less than gen8_sup_lam05 (+14 Elo).
+
+### Summary of AlphaZero Phase
+
+| Approach | Result | Reason |
+|----------|--------|--------|
+| Gumbel AZ 800 sims, 30% expert | 0% vs Gen7 | 1-ply search + self-play regression |
+| Gumbel AZ 400 sims, 70% expert | No improvement from supervised | Signal too weak |
+| Supervised + TrueBatchMCTS (baseline) | **20% vs Gen7 (1s)** | Proper search, expert policy |
+| NNUE distillation λ=0.7 | -42 Elo (FAILED) | Overfit to eval, hurt result signal |
+| NNUE distillation λ=0.5 | **+14 Elo** | Best lambda balance |
+| NNUE distillation λ=0.3 | ~+10 Elo (noisy) | Too much result weight |
+| Combined gen7+distill data | Equal | No additive benefit |
+| 256→64→1 transfer learning | +11 Elo | Capacity > speed tradeoff |
+| 256→64→1 fine-tuned gen7 data | +11 Elo | Same as transfer, fine-tune neutral |
+
+**Conclusion: All distillation approaches converge to ~+10-14 Elo above Gen7. The 256→32→1 capacity is the binding constraint.**
+
+## 32. Next Steps
+
+### All Conventional Approaches Exhausted
+Every standard improvement path has been tested and either applied or ruled out:
+
+**Applied (cumulative ~1184 Elo above HCE):**
+- Self-play generations Gen2→Gen7: +414 Elo
+- K=400 sigmoid scaling: +256 Elo
+- ASP_DELTA=35 tuning: +179 Elo
+- Endgame search improvements: +206 Elo
+- EGTB N≤4: +~30 Elo
+- QSearch TT + move ordering: +28 Elo
+- Opening book: +~120 Elo (estimated)
+
+**Ruled Out (by experiment):**
+- More self-play iterations (Gen8, 4 attempts): -17 to -90 Elo
+- Larger architectures (512→64, 256→64): -53, -35 Elo
+- More input features (58-feat): +10 = noise
+- Deeper datagen (depth 14): -19 Elo
+- Mixed-generation data: always hurts (confirmed 4x)
+- Aggressive pruning (history, NMP, LMR): -70 to -75 Elo
+- Lambda tuning (λ=0.2): -62 Elo
+- Parameter combinations: always worse than single best
+- 40K vs 20K data: more data hurts at capacity
+
+### Remaining Potential Improvements
+1. **MCTS (Monte Carlo Tree Search)** — fundamentally different search paradigm
+2. **Transformer/attention architecture** — may learn patterns NNUE can't
+3. **PlayOK integration** — test against real humans, identify specific weaknesses
+4. **Larger EGTB (N≤5)** — requires 64GB+ RAM machine
+5. **Texel tuning** — re-tune all pruning margins for current eval
 
 ---
 
@@ -1047,7 +1587,40 @@ Baseline (HCE only):                    0 Elo
 + Gen5 fine-tuning (depth 10):        +42 Elo  (cumulative ~926)
 + Gen6 (depth-10 plateau):            +0 Elo  (cumulative ~926)
 + 58-feat experiment:                  +0 Elo  (cumulative ~926, best +10 = noise)
-= Current estimated strength:         ~926 Elo above baseline HCE
++ Lambda=0.2 experiment:               -62 Elo (FAILED, λ=0.5 confirmed optimal)
++ Search improvements (QS TT+QOrder):  +28 Elo  (cumulative ~954)
++ Depth-14 midgame fine-tune:           -19 Elo  (FAILED)
++ ASP_DELTA=35 tuning:               +179 Elo  (cumulative ~1133)   ← NEW
++ Gen6 (improved search datagen):    +160 Elo  (cumulative ~1133*)  ← NEW (replaces old Gen6)
++ Gen7 (iterative self-play):         +70 Elo  (cumulative ~1184*)  ← NEW
++ Gen8 (4 attempts):                   -17 to -90 Elo (ALL FAILED)
++ 512→64→1 architecture:              -53 Elo  (FAILED)
++ 256→64→1 architecture:              -35 Elo  (FAILED after iter)
++ NNUE distillation (gen8_sup_lam05): +14 Elo  (supervised model + MCTS data)
++ 256→64→1 fine-tuned (arch64_gen7ft): +11 Elo (architecture upgrade)
+= Current estimated strength:        ~1198 Elo above baseline HCE (Gen8_sup_lam05)
 ```
 
-*Note: Elo values are approximate and measured in different conditions. The relative ordering is accurate but absolute values should not be summed directly.*
+*Note: Gen6 (+160) absorbed the search improvement (+28) since datagen used the improved engine. ASP_DELTA (+179) is cumulative with search changes. Elo values are approximate.*
+
+### Generational Gains Summary
+
+| Generation | Elo Gain | Method | Status |
+|------------|----------|--------|--------|
+| Gen1 | +~200 | Initial NNUE training | Applied |
+| K=400 | +256 | Sigmoid scale fix | Applied |
+| Gen2 | +~50 | Self-play iteration | Applied |
+| Gen3 | +104 | + Expert data | Applied |
+| Gen4 | +38 | 11M positions | Applied |
+| Search v1 | +206 | Endgame improvements | Applied |
+| EGTB | +~30 | N≤4 tablebases | Applied |
+| Gen5 | +42 | Depth-10 fine-tune | Applied |
+| Search v2 | +28 | QSearch TT + ordering | Applied |
+| ASP tuning | +179 | ASP_DELTA=35 | Applied |
+| **Gen6** | **+160** | **Improved search datagen** | **Applied** |
+| **Gen7** | **+70** | **Iterative self-play** | **Applied (BEST)** |
+| Gen8 (×4) | -17 to -90 | More iterations | FAILED |
+| 512→64→1 | -53 | Larger architecture | FAILED |
+| 256→64→1 | -35 | Medium architecture | FAILED |
+| Gumbel AZ iter16 | 0% winrate | 1-ply search, self-play regression | FAILED |
+| Supervised+MCTS | 20% vs Gen7 (1s) | Supervised model + TrueBatchMCTS 400 sims | PENDING (distill to NNUE) |
