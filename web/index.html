@@ -491,6 +491,101 @@ body {
 @keyframes modalPop { from{transform:scale(0.8);opacity:0} to{transform:scale(1);opacity:1} }
 .modal h2 { font-size: 26px; color: var(--accent-gold); margin-bottom: 8px; }
 .modal p { font-size: 16px; margin-bottom: 18px; }
+
+/* === HISTORY SCREEN === */
+.history-screen { display: none; }
+.history-screen.active {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-height: 100vh;
+    padding: 20px;
+}
+.history-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+    width: 600px;
+    max-width: 95vw;
+}
+.history-header h2 {
+    font-size: 24px;
+    color: var(--accent-gold);
+    flex: 1;
+}
+.history-list {
+    width: 600px;
+    max-width: 95vw;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+.history-item {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 12px;
+    padding: 14px 18px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.history-item:hover {
+    border-color: var(--accent-gold);
+    background: rgba(255,213,79,0.08);
+    transform: translateY(-1px);
+}
+.history-item .game-info { flex: 1; }
+.history-item .game-date { font-size: 12px; color: #8D6E63; }
+.history-item .game-result {
+    font-size: 14px;
+    font-weight: bold;
+    margin-top: 2px;
+}
+.history-item .game-result.win { color: var(--accent-green); }
+.history-item .game-result.loss { color: #EF5350; }
+.history-item .game-result.draw { color: #FFA726; }
+.history-item .game-result.abandoned { color: #8D6E63; }
+.history-item .game-moves {
+    font-size: 12px;
+    color: #8D6E63;
+    margin-top: 2px;
+}
+.history-item .game-replay {
+    padding: 8px 16px;
+    background: linear-gradient(135deg, var(--accent-gold), #FFC107);
+    color: var(--text-dark);
+    border: none;
+    border-radius: 8px;
+    font-weight: bold;
+    font-size: 12px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.history-empty {
+    text-align: center;
+    color: #8D6E63;
+    padding: 40px;
+    font-size: 15px;
+}
+
+/* Replay controls */
+.replay-controls {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    align-items: center;
+    justify-content: center;
+}
+.replay-controls .btn { min-width: 44px; text-align: center; }
+.replay-info {
+    font-size: 13px;
+    color: #8D6E63;
+    min-width: 80px;
+    text-align: center;
+}
 </style>
 </head>
 <body>
@@ -540,6 +635,18 @@ body {
         </div>
 
         <button class="lobby-start" onclick="startGame()">Бастау</button>
+        <button class="lobby-start" style="margin-top:8px;background:linear-gradient(135deg,#8D6E63,#5D4037);color:var(--text-light)" onclick="showHistory()">Ойын тарихы</button>
+    </div>
+</div>
+
+<!-- ========== HISTORY SCREEN ========== -->
+<div class="history-screen" id="history-screen">
+    <div class="history-header">
+        <button class="btn btn-dark" onclick="hideHistory()">← Артқа</button>
+        <h2>Ойын тарихы</h2>
+    </div>
+    <div class="history-list" id="history-list">
+        <div class="history-empty">Жүктелуде...</div>
     </div>
 </div>
 
@@ -588,9 +695,17 @@ body {
             <span class="score-box" id="bottom-score">0</span>
         </div>
 
-        <div class="board-controls">
+        <div class="board-controls" id="game-controls">
             <button class="btn btn-gold" onclick="goToLobby()">Жаңа ойын</button>
             <button class="btn btn-dark" onclick="undoMove()">Артқа</button>
+        </div>
+        <div class="replay-controls" id="replay-controls" style="display:none">
+            <button class="btn btn-dark btn-sm" onclick="replayFirst()">⏮</button>
+            <button class="btn btn-dark btn-sm" onclick="replayPrev()">◀</button>
+            <span class="replay-info" id="replay-info">0 / 0</span>
+            <button class="btn btn-dark btn-sm" onclick="replayNext()">▶</button>
+            <button class="btn btn-dark btn-sm" onclick="replayLast()">⏭</button>
+            <button class="btn btn-gold btn-sm" style="margin-left:10px" onclick="exitReplay()">Шығу</button>
         </div>
         <div class="status-line" id="status"></div>
     </div>
@@ -666,6 +781,17 @@ let animating = false;
 let currentMode = 'game';
 let viewIndex = -1;
 let detailsOpen = false;
+let sessionId = generateSessionId();
+
+function generateSessionId() {
+    return 'g_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
+function apiFetch(url, opts = {}) {
+    if (!opts.headers) opts.headers = {};
+    opts.headers['X-Session-Id'] = sessionId;
+    return fetch(url, opts);
+}
 
 function initialBoard() {
     return {
@@ -1047,6 +1173,7 @@ function updateAnalysis(data) {
 
 // ===== GAME FLOW =====
 async function newGame() {
+    sessionId = generateSessionId();
     board = initialBoard();
     moveHistory=[]; gameStates=[]; moveNotation=[];
     engineThinking=false; gameOver=false; lastMove=null; viewIndex=-1;
@@ -1072,7 +1199,7 @@ async function newGame() {
     renderBoard(board);
     renderMoveList();
 
-    try { await fetch('/api/newgame',{method:'POST'}); } catch(e){}
+    try { await apiFetch('/api/newgame',{method:'POST'}); } catch(e){}
 
     if(board.side_to_move !== humanSide) engineMove();
 }
@@ -1091,9 +1218,9 @@ async function humanMove(pit) {
     renderMoveList();
 
     try {
-        await fetch('/api/position',{
+        await apiFetch('/api/position',{
             method:'POST', headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({board:board})
+            body:JSON.stringify({board:board, move_pit:pit})
         });
     } catch(e){}
 
@@ -1109,7 +1236,7 @@ async function engineMove() {
     renderBoard(board);
 
     try {
-        const resp=await fetch('/api/move',{
+        const resp=await apiFetch('/api/move',{
             method:'POST', headers:{'Content-Type':'application/json'},
             body:JSON.stringify({board:board, time_ms:engineTimeMs})
         });
@@ -1161,7 +1288,7 @@ function undoMove() {
     setStatus('');
     renderBoard(board);
     renderMoveList();
-    fetch('/api/newgame',{method:'POST'}).catch(()=>{});
+    apiFetch('/api/newgame',{method:'POST'}).catch(()=>{});
 }
 
 function showResult(result) {
@@ -1185,6 +1312,233 @@ function setStatus(msg){
     el.textContent=msg;
     el.className=msg.includes('ойлануда')?'status-line thinking':'status-line';
 }
+
+// ===== GAME HISTORY =====
+let replayMode = false;
+let replayMoves = [];
+let replayStates = [];
+let replayIndex = 0;
+
+async function showHistory() {
+    document.getElementById('lobby').classList.add('hidden');
+    document.getElementById('history-screen').classList.add('active');
+    const listEl = document.getElementById('history-list');
+    listEl.innerHTML = '<div class="history-empty">Жүктелуде...</div>';
+    try {
+        const resp = await fetch('/api/games');
+        const data = await resp.json();
+        if (!data.games || data.games.length === 0) {
+            listEl.innerHTML = '<div class="history-empty">Ойындар тарихы бос</div>';
+            return;
+        }
+        listEl.innerHTML = '';
+        // Show newest first
+        const games = data.games.slice().reverse();
+        for (let i = 0; i < games.length; i++) {
+            const g = games[i];
+            const item = document.createElement('div');
+            item.className = 'history-item';
+
+            const resultText = getResultText(g.result);
+            const resultClass = getResultClass(g.result);
+            const dateStr = g.start_time ? new Date(g.start_time).toLocaleString('kk-KZ') : '—';
+            const numMoves = g.num_moves || (g.moves ? g.moves.length : 0);
+
+            item.innerHTML = `
+                <div class="game-info">
+                    <div class="game-date">${dateStr}</div>
+                    <div class="game-result ${resultClass}">${resultText}</div>
+                    <div class="game-moves">${numMoves} жүріс</div>
+                </div>
+                <button class="game-replay" data-idx="${i}">Қайта көру</button>
+            `;
+            item.querySelector('.game-replay').onclick = (e) => {
+                e.stopPropagation();
+                startReplay(games[i]);
+            };
+            item.onclick = () => startReplay(games[i]);
+            listEl.appendChild(item);
+        }
+    } catch(e) {
+        listEl.innerHTML = '<div class="history-empty">Қате: ' + e.message + '</div>';
+    }
+}
+
+function getResultText(result) {
+    if (!result) return 'Белгісіз';
+    if (result === 'white_win') return 'Ақ жеңді';
+    if (result === 'black_win') return 'Қара жеңді';
+    if (result === 'draw') return 'Тең';
+    if (result === 'abandoned') return 'Аяқталмаған';
+    return result;
+}
+
+function getResultClass(result) {
+    if (result === 'white_win' || result === 'black_win') return 'win';
+    if (result === 'draw') return 'draw';
+    if (result === 'abandoned') return 'abandoned';
+    return '';
+}
+
+function hideHistory() {
+    document.getElementById('history-screen').classList.remove('active');
+    document.getElementById('lobby').classList.remove('hidden');
+}
+
+function startReplay(gameData) {
+    document.getElementById('history-screen').classList.remove('active');
+    document.getElementById('game-screen').classList.add('active');
+
+    replayMode = true;
+    replayMoves = [];
+    replayStates = [];
+    replayIndex = 0;
+    gameOver = true; // Prevent interaction
+    engineThinking = false;
+    lastMove = null;
+    moveNotation = [];
+
+    // Rebuild all states from logged moves
+    const initBoard = initialBoard();
+    replayStates.push(cloneBoard(initBoard));
+    let b = cloneBoard(initBoard);
+
+    if (gameData.moves) {
+        for (const m of gameData.moves) {
+            const pit = m.bestmove !== undefined ? m.bestmove : null;
+            if (pit === null || pit === undefined) continue;
+            const side = b.side_to_move;
+            if (!isValidMove(b, pit)) continue;
+            makeMove(b, pit);
+            replayStates.push(cloneBoard(b));
+            replayMoves.push({
+                side: side,
+                pit: pit + 1,
+                source: m.who || 'unknown',
+                score: m.score,
+                depth: m.depth,
+            });
+        }
+    }
+
+    // Setup UI
+    humanSide = 0;
+    document.getElementById('bottom-name').textContent = 'Ақ';
+    document.getElementById('top-name').textContent = 'Қара';
+    document.getElementById('game-controls').style.display = 'none';
+    document.getElementById('replay-controls').style.display = 'flex';
+
+    // Set mode to analysis for move clicking
+    currentMode = 'analysis';
+    document.getElementById('tab-game').className = 'mode-tab';
+    document.getElementById('tab-analysis').className = 'mode-tab active';
+
+    // Build moveNotation for the move list display
+    moveNotation = replayMoves.slice();
+    gameStates = replayStates.slice(1); // gameStates[i] = state after move i
+
+    replayIndex = 0;
+    board = cloneBoard(replayStates[0]);
+    lastMove = null;
+    renderBoard(board);
+    renderMoveList();
+    updateReplayInfo();
+    setStatus('Ойынды қайта көру режімі');
+}
+
+function updateReplayInfo() {
+    document.getElementById('replay-info').textContent = replayIndex + ' / ' + replayMoves.length;
+    // Highlight current move in move list
+    viewIndex = replayIndex > 0 ? replayIndex - 1 : -1;
+    renderMoveList();
+    // Update analysis panel if we have data
+    if (replayIndex > 0 && replayMoves[replayIndex - 1]) {
+        const m = replayMoves[replayIndex - 1];
+        document.getElementById('a-move').textContent = 'Отау ' + m.pit;
+        document.getElementById('a-score').textContent = m.score !== undefined ? formatScore(m.score) : '—';
+        document.getElementById('a-depth').textContent = m.depth || '—';
+    } else {
+        document.getElementById('a-move').textContent = '—';
+        document.getElementById('a-score').textContent = '—';
+        document.getElementById('a-depth').textContent = '—';
+    }
+}
+
+function replayFirst() {
+    if (!replayMode) return;
+    replayIndex = 0;
+    board = cloneBoard(replayStates[0]);
+    lastMove = null;
+    renderBoard(board);
+    updateReplayInfo();
+}
+
+function replayPrev() {
+    if (!replayMode || replayIndex <= 0) return;
+    replayIndex--;
+    board = cloneBoard(replayStates[replayIndex]);
+    lastMove = null;
+    renderBoard(board);
+    updateReplayInfo();
+}
+
+function replayNext() {
+    if (!replayMode || replayIndex >= replayMoves.length) return;
+    replayIndex++;
+    board = cloneBoard(replayStates[replayIndex]);
+    if (replayIndex > 0) {
+        const m = replayMoves[replayIndex - 1];
+        lastMove = {side: m.side, pit: m.pit - 1, landSide: -1, landPit: -1};
+    }
+    renderBoard(board);
+    updateReplayInfo();
+}
+
+function replayLast() {
+    if (!replayMode) return;
+    replayIndex = replayMoves.length;
+    board = cloneBoard(replayStates[replayIndex]);
+    if (replayIndex > 0) {
+        const m = replayMoves[replayIndex - 1];
+        lastMove = {side: m.side, pit: m.pit - 1, landSide: -1, landPit: -1};
+    }
+    renderBoard(board);
+    updateReplayInfo();
+}
+
+function exitReplay() {
+    replayMode = false;
+    document.getElementById('game-controls').style.display = 'flex';
+    document.getElementById('replay-controls').style.display = 'none';
+    goToLobby();
+}
+
+// Override viewMove for replay mode
+const _origViewMove = viewMove;
+viewMove = function(idx) {
+    if (replayMode) {
+        replayIndex = idx + 1;
+        board = cloneBoard(replayStates[replayIndex]);
+        if (replayIndex > 0) {
+            const m = replayMoves[replayIndex - 1];
+            lastMove = {side: m.side, pit: m.pit - 1, landSide: -1, landPit: -1};
+        }
+        renderBoard(board);
+        updateReplayInfo();
+        return;
+    }
+    _origViewMove(idx);
+};
+
+// Keyboard navigation for replay
+document.addEventListener('keydown', function(e) {
+    if (!replayMode) return;
+    if (e.key === 'ArrowLeft') { replayPrev(); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { replayNext(); e.preventDefault(); }
+    if (e.key === 'Home') { replayFirst(); e.preventDefault(); }
+    if (e.key === 'End') { replayLast(); e.preventDefault(); }
+    if (e.key === 'Escape') { exitReplay(); e.preventDefault(); }
+});
 </script>
 </body>
 </html>

@@ -103,9 +103,10 @@ class Board:
 
 
 class Engine:
-    def __init__(self, binary, nnue_weights):
+    def __init__(self, binary, nnue_weights, engine_dir=None):
         # cwd must be the engine directory where weights/egtb files live
-        engine_dir = os.path.dirname(os.path.abspath(nnue_weights))
+        if engine_dir is None:
+            engine_dir = os.path.dirname(os.path.abspath(nnue_weights))
         self.proc = subprocess.Popen(
             [os.path.abspath(binary), 'serve'],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -188,8 +189,10 @@ def main():
     print(f"Weights: {os.path.basename(weights)}")
     print(f"Games: {games}, Time: {time_ms}ms")
 
-    eng_a = Engine(bin_a, weights)
-    eng_b = Engine(bin_b, weights)
+    dir_a = os.path.dirname(os.path.abspath(bin_a))
+    dir_b = os.path.dirname(os.path.abspath(bin_b))
+    eng_a = Engine(bin_a, weights, engine_dir=dir_a)
+    eng_b = Engine(bin_b, weights, engine_dir=dir_b)
 
     wins_a, wins_b, draws = 0, 0, 0
     for g in range(games):

@@ -693,6 +693,7 @@ def main():
     parser.add_argument("--resume", type=str, default=None, help="Resume from checkpoint")
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=0.001)
+    parser.add_argument("--save-interval", type=int, default=5, help="Save checkpoint every N iterations")
     args = parser.parse_args()
 
     config = GumbelConfig(
@@ -705,6 +706,7 @@ def main():
         num_iterations=args.iterations,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        save_interval=args.save_interval,
     )
 
     trainer = GumbelTrainer(config)

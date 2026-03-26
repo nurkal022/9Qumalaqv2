@@ -300,6 +300,8 @@ def create_model(size: str = "medium", device: str = "cuda") -> nn.Module:
         model = TogyzNetSmall()
     elif size == "medium":
         model = TogyzNet(num_res_blocks=10, num_channels=128)
+    elif size == "large2m":
+        model = TogyzNet(num_res_blocks=10, num_channels=192)
     elif size == "large":
         model = TogyzNetLarge(num_res_blocks=20, num_channels=256)
     else:

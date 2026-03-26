@@ -94,45 +94,95 @@ class NNUE(nn.Module):
 def sigmoid_eval(x, k=K):
     return torch.sigmoid(x / (k / 4.0))
 
-def load_binary_weights(model, bin_path):
-    """Load quantized binary weights into PyTorch model"""
+def load_binary_weights(model, bin_path, model_input_size=40):
+    """Load quantized binary weights into PyTorch model.
+    Handles both old format (hidden1>=128) and new format (input_size<128)."""
     SCALE = 64
     with open(bin_path, 'rb') as f:
         data = f.read()
-    
-    hidden1 = struct.unpack('<H', data[0:2])[0]
-    hidden2 = struct.unpack('<H', data[2:4])[0]
-    offset = 4
-    
+
+    first_val = struct.unpack('<H', data[0:2])[0]
+
+    if first_val < 128:
+        # New format: [input_size, hidden1, hidden2, hidden3]
+        file_input_size = first_val
+        hidden1 = struct.unpack('<H', data[2:4])[0]
+        hidden2 = struct.unpack('<H', data[4:6])[0]
+        hidden3 = struct.unpack('<H', data[6:8])[0]
+        offset = 8
+    else:
+        # Old format: [hidden1, hidden2]
+        file_input_size = 40
+        hidden1 = first_val
+        hidden2 = struct.unpack('<H', data[2:4])[0]
+        hidden3 = 0
+        offset = 4
+
     def read_i16_array(n):
         nonlocal offset
         arr = np.frombuffer(data[offset:offset+n*2], dtype=np.int16).astype(np.float32) / SCALE
         offset += n * 2
         return arr
-    
+
     state = model.state_dict()
-    fc1_w = read_i16_array(hidden1 * INPUT_SIZE).reshape(hidden1, INPUT_SIZE)
-    state['fc1.weight'] = torch.tensor(fc1_w)
+    model_h1 = state['fc1.weight'].shape[0]
+    model_h2 = state['fc2.weight'].shape[0]
+
+    fc1_w_file = read_i16_array(hidden1 * file_input_size).reshape(hidden1, file_input_size)
     fc1_b = read_i16_array(hidden1)
-    state['fc1.bias'] = torch.tensor(fc1_b)
     fc2_w = read_i16_array(hidden2 * hidden1).reshape(hidden2, hidden1)
-    state['fc2.weight'] = torch.tensor(fc2_w)
     fc2_b = read_i16_array(hidden2)
-    state['fc2.bias'] = torch.tensor(fc2_b)
     fc3_w = read_i16_array(hidden2).reshape(1, hidden2)
-    state['fc3.weight'] = torch.tensor(fc3_w)
     fc3_b = read_i16_array(1)
-    state['fc3.bias'] = torch.tensor(fc3_b)
-    
-    model.load_state_dict(state)
-    print(f"Loaded binary weights from {bin_path}: {hidden1}→{hidden2}→1")
+
+    # If model architecture matches file exactly, load directly
+    if model_h1 == hidden1 and model_h2 == hidden2 and model_input_size == file_input_size:
+        state['fc1.weight'] = torch.tensor(fc1_w_file)
+        state['fc1.bias'] = torch.tensor(fc1_b)
+        state['fc2.weight'] = torch.tensor(fc2_w)
+        state['fc2.bias'] = torch.tensor(fc2_b)
+        state['fc3.weight'] = torch.tensor(fc3_w)
+        state['fc3.bias'] = torch.tensor(fc3_b)
+        model.load_state_dict(state)
+        print(f"Loaded binary weights from {bin_path}: {hidden1}→{hidden2}→1 (exact match)")
+    else:
+        # Transfer learning: copy what fits, leave rest random
+        # fc1: copy overlapping input/hidden dimensions
+        min_in = min(file_input_size, model_input_size)
+        min_h1 = min(hidden1, model_h1)
+        min_h2 = min(hidden2, model_h2)
+        fc1_w_new = state['fc1.weight'].clone()
+        fc1_w_new[:min_h1, :min_in] = torch.tensor(fc1_w_file[:min_h1, :min_in])
+        state['fc1.weight'] = fc1_w_new
+        fc1_b_new = state['fc1.bias'].clone()
+        fc1_b_new[:min_h1] = torch.tensor(fc1_b[:min_h1])
+        state['fc1.bias'] = fc1_b_new
+        # fc2: copy overlapping
+        fc2_w_new = state['fc2.weight'].clone()
+        fc2_w_new[:min_h2, :min_h1] = torch.tensor(fc2_w[:min_h2, :min_h1])
+        state['fc2.weight'] = fc2_w_new
+        fc2_b_new = state['fc2.bias'].clone()
+        fc2_b_new[:min_h2] = torch.tensor(fc2_b[:min_h2])
+        state['fc2.bias'] = fc2_b_new
+        # fc3: copy overlapping
+        fc3_w_new = state['fc3.weight'].clone()
+        fc3_w_new[0, :min_h2] = torch.tensor(fc3_w[0, :min_h2])
+        state['fc3.weight'] = fc3_w_new
+        state['fc3.bias'] = torch.tensor(fc3_b)
+        model.load_state_dict(state)
+        print(f"Transfer from {bin_path}: {file_input_size}→{hidden1}→{hidden2}→1 → model {model_input_size}→{model_h1}→{model_h2}→1")
     return model
 
-def export_binary(model, path, hidden1, hidden2):
+def export_binary(model, path, hidden1, hidden2, input_size=40):
     SCALE = 64
     state = model.state_dict()
     with open(path, 'wb') as f:
-        f.write(struct.pack('<HH', hidden1, hidden2))
+        if input_size == 40 and hidden1 <= 256:
+            # Old format for backward compat with 40-input 256-hidden
+            f.write(struct.pack('<HH', hidden1, hidden2))
+        else:
+            # New format: [input_size, hidden1, hidden2, hidden3=0]
+            f.write(struct.pack('<HHHH', input_size, hidden1, hidden2, 0))
         for name in ['fc1.weight', 'fc1.bias', 'fc2.weight', 'fc2.bias', 'fc3.weight', 'fc3.bias']:
             tensor = state[name].cpu().float().numpy().flatten()
             quantized = np.clip(tensor * SCALE, -32000, 32000).astype(np.int16)
@@ -151,7 +201,15 @@ def finetune():
     parser.add_argument('--hidden2', type=int, default=32)
     parser.add_argument('--lam', type=float, default=0.5)
     parser.add_argument('--output-bin', default='nnue_finetuned.bin')
+    parser.add_argument('--seed', type=int, default=None)
     args = parser.parse_args()
+
+    if args.seed is not None:
+        torch.manual_seed(args.seed)
+        np.random.seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(args.seed)
+        print(f"Random seed: {args.seed}")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Device: {device}")
@@ -167,8 +225,8 @@ def finetune():
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
     val_loader = DataLoader(val_set, batch_size=args.batch_size * 2, num_workers=4, pin_memory=True)
 
-    model = NNUE(hidden1=args.hidden1, hidden2=args.hidden2).to('cpu')
-    load_binary_weights(model, args.init_weights)
+    model = NNUE(input_size=INPUT_SIZE, hidden1=args.hidden1, hidden2=args.hidden2).to('cpu')
+    load_binary_weights(model, args.init_weights, model_input_size=INPUT_SIZE)
     model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -226,11 +284,11 @@ def finetune():
             marker = " *"
         else:
             marker = ""
-        if (epoch + 1) % 5 == 0 or epoch == 0:
+        if (epoch + 1) % 3 == 0 or epoch == 0:
             print(f"Epoch {epoch+1:3d}/{args.epochs}  train={avg_train:.6f}  val={avg_val:.6f}  lr={scheduler.get_last_lr()[0]:.6f}{marker}")
 
     model.load_state_dict(torch.load(best_pt, weights_only=True))
-    export_binary(model, args.output_bin, args.hidden1, args.hidden2)
+    export_binary(model, args.output_bin, args.hidden1, args.hidden2, input_size=INPUT_SIZE)
     print(f"\nFine-tuning complete! Best val loss: {best_val_loss:.6f}")
 
 if __name__ == '__main__':

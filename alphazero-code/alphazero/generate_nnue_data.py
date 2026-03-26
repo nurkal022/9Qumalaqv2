@@ -243,6 +243,10 @@ def main():
     all_records = []
     num_batches = (args.games + args.batch_size - 1) // args.batch_size
     t0 = time.time()
+    save_interval = max(1, 500 // args.batch_size)  # save every ~500 games
+
+    # Open output file for incremental writing
+    out_f = open(args.output, 'wb')
 
     for batch_idx in range(num_batches):
         batch_games = min(args.batch_size, args.games - batch_idx * args.batch_size)
@@ -256,14 +260,19 @@ def main():
         print(f"  Batch {batch_idx+1}/{num_batches}: {len(all_records)} positions, "
               f"{games_done} games ({rate:.1f} games/s, {elapsed:.0f}s)")
 
-    # Shuffle
-    import random
-    random.shuffle(all_records)
+        # Incremental save every save_interval batches
+        if (batch_idx + 1) % save_interval == 0 or batch_idx == num_batches - 1:
+            import random
+            import io
+            tmp = list(all_records)
+            random.shuffle(tmp)
+            out_f.seek(0)
+            out_f.truncate()
+            for rec in tmp:
+                out_f.write(rec)
+            out_f.flush()
 
-    # Write
-    with open(args.output, 'wb') as f:
-        for rec in all_records:
-            f.write(rec)
+    out_f.close()
 
     elapsed = time.time() - t0
     size_mb = os.path.getsize(args.output) / 1e6
