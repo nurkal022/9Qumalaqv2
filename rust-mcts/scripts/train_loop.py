@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Full AlphaZero training loop v2: Rust selfplay -> Python train -> ONNX export -> eval -> repeat.
+AlphaZero training loop v3 — fixes for self-play collapse.
 
-Key improvements over v1:
-- Best model selection: selfplay always uses best checkpoint (not current)
-- Lower lr (0.0003) with cosine annealing to prevent forgetting pretrained knowledge
-- 20-game eval for more reliable signal
-- Freshness weighting: recent positions sampled 2x more often
-- Gating: new model must beat current best to become selfplay model
+Key changes from v2:
+1. NO GATING — always use latest model for selfplay (like AlphaZero)
+2. 200 sims + playout cap randomization (4x throughput)
+3. Dirichlet alpha=1.1 (correct for branching factor ~9)
+4. Expert data mixing (20%) to prevent policy degradation
+5. Color-paired evaluation (40 games = 20 pairs)
+6. Eval is monitoring only, never gates
+7. Temperature: τ=1.0 for 25 moves, linear decay to 0.3
 
 Usage:
-  python scripts/train_loop.py --iterations 500 --games 100 --sims 800 --model-size large2m \
-      --init-checkpoint ../alphazero-code/alphazero/checkpoints/supervised_pretrained_2m.pt
+  python scripts/train_loop.py --iterations 500 --games 200 --sims 200 --model-size large2m \
+      --init-checkpoint checkpoints_2m_v2/best.pt
 """
 
-import sys, os, argparse, subprocess, time, shutil, tempfile, math
+import sys, os, argparse, subprocess, time, shutil, tempfile
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -40,10 +42,11 @@ CUDA_LD_PATH = ':'.join([
     f'{NVIDIA_LIBS}/cufft/lib',
 ])
 ORT_DYLIB = os.path.expanduser('~/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4')
+EXPERT_DIR = os.path.join(os.path.dirname(__file__), '../../game-pars/games')
 
 
-def rust_selfplay(model_onnx, output_bin, games=100, sims=800, workers=20, batch_size=128):
-    """Run Rust MCTS self-play and produce replay buffer."""
+def rust_selfplay(model_onnx, output_bin, games=200, sims=200, workers=20, batch_size=128):
+    """Run Rust MCTS self-play with playout cap randomization."""
     env = os.environ.copy()
     env['ORT_DYLIB_PATH'] = ORT_DYLIB
     env['LD_LIBRARY_PATH'] = CUDA_LD_PATH + ':' + env.get('LD_LIBRARY_PATH', '')
@@ -56,6 +59,8 @@ def rust_selfplay(model_onnx, output_bin, games=100, sims=800, workers=20, batch
         '--workers', str(workers),
         '--batch-size', str(batch_size),
         '--output', os.path.abspath(output_bin),
+        '--dirichlet-alpha', '1.1',
+        '--temp-threshold', '25',
     ]
 
     t0 = time.time()
@@ -81,51 +86,121 @@ def rust_selfplay(model_onnx, output_bin, games=100, sims=800, workers=20, batch
     return True, positions, elapsed
 
 
+def load_expert_positions(max_examples=100000):
+    """Load PlayOK expert data as (states, policies, values)."""
+    if not os.path.isdir(EXPERT_DIR):
+        return None
+
+    from supervised_pretrain import parse_pgn, extract_moves
+
+    files = [os.path.join(EXPERT_DIR, f) for f in os.listdir(EXPERT_DIR) if f.endswith('.txt')]
+    np.random.shuffle(files)
+
+    examples_s, examples_p, examples_v = [], [], []
+
+    for filepath in files:
+        if len(examples_s) >= max_examples:
+            break
+        try:
+            headers, move_text = parse_pgn(filepath)
+            if headers is None:
+                continue
+            w_elo = int(headers.get('WhiteElo', '0'))
+            b_elo = int(headers.get('BlackElo', '0'))
+            if w_elo < 1400 or b_elo < 1400:
+                continue
+
+            result_str = headers.get('Result', '')
+            if result_str == '1-0': white_value = 1.0
+            elif result_str == '0-1': white_value = -1.0
+            elif result_str == '1/2-1/2': white_value = 0.0
+            else: continue
+
+            moves = extract_moves(move_text)
+            if len(moves) < 10:
+                continue
+
+            game = TogyzQumalaq()
+            for ply, pit in enumerate(moves):
+                valid_moves = game.get_valid_moves_list()
+                if pit not in valid_moves:
+                    break
+                if ply >= 2:
+                    state = game.encode_state()
+                    cp = game.state.current_player
+                    value = white_value if cp == Player.WHITE else -white_value
+                    policy = np.zeros(9, dtype=np.float32)
+                    policy[pit] = 1.0
+                    examples_s.append(state)
+                    examples_p.append(policy)
+                    examples_v.append(value)
+                success, winner = game.make_move(pit)
+                if not success or winner is not None:
+                    break
+        except Exception:
+            pass
+
+    if examples_s:
+        return (np.array(examples_s, dtype=np.float32),
+                np.array(examples_p, dtype=np.float32),
+                np.array(examples_v, dtype=np.float32))
+    return None
+
+
 def train_on_buffer(model, optimizer, buffer_path,
-                    max_buffer=500000, epochs=3, batch_size=512, device='cuda',
-                    freshness_weight=True):
-    """Train model on replay buffer with freshness weighting."""
+                    expert_data=None, expert_ratio=0.2,
+                    max_buffer=500000, epochs=2, batch_size=512, device='cuda'):
+    """Train model on replay buffer with expert data mixing.
+
+    Positions with all-zero policy (from fast playout cap) train value only.
+    """
     states, policies, values = load_replay_buffer(buffer_path)
     n = len(states)
     if n == 0:
         return 0, 0, 0, 0
 
-    # Trim to max
     if n > max_buffer:
         states = states[-max_buffer:]
         policies = policies[-max_buffer:]
         values = values[-max_buffer:]
         n = max_buffer
 
-    # Freshness weights: newer data sampled more often
-    if freshness_weight and n > 10000:
-        # Linear weight: oldest=0.5, newest=1.5
-        weights = np.linspace(0.5, 1.5, n)
-        weights /= weights.sum()
-    else:
-        weights = None
-
     model.train()
 
     for epoch in range(epochs):
-        if weights is not None:
-            # Weighted sampling (with replacement)
-            indices = np.random.choice(n, size=n, replace=True, p=weights)
-        else:
-            indices = np.random.permutation(n)
-
+        indices = np.random.permutation(n)
         total_loss, total_p, total_v, num_batches = 0, 0, 0, 0
 
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
             idx = indices[start:end]
+            actual_batch = end - start
 
             s = torch.FloatTensor(states[idx]).to(device)
             p_target = torch.FloatTensor(policies[idx]).to(device)
             v_target = torch.FloatTensor(values[idx]).unsqueeze(1).to(device)
 
+            # Mix in expert data
+            if expert_data is not None:
+                ex_s, ex_p, ex_v = expert_data
+                n_expert = int(actual_batch * expert_ratio)
+                if n_expert > 0 and len(ex_s) > 0:
+                    ex_idx = np.random.choice(len(ex_s), min(n_expert, len(ex_s)), replace=False)
+                    s = torch.cat([s, torch.FloatTensor(ex_s[ex_idx]).to(device)])
+                    p_target = torch.cat([p_target, torch.FloatTensor(ex_p[ex_idx]).to(device)])
+                    v_target = torch.cat([v_target, torch.FloatTensor(ex_v[ex_idx]).unsqueeze(1).to(device)])
+
             log_p, v = model(s)
-            p_loss = -torch.mean(torch.sum(p_target * log_p, dim=1))
+
+            # Policy loss: only on positions with non-zero policy
+            # (playout cap: fast-search positions have all-zero policy)
+            policy_mask = (p_target.sum(dim=1) > 0.5).float()
+            if policy_mask.sum() > 0:
+                p_loss_per = -torch.sum(p_target * log_p, dim=1)
+                p_loss = (p_loss_per * policy_mask).sum() / policy_mask.sum()
+            else:
+                p_loss = torch.tensor(0.0, device=device)
+
             v_loss = F.mse_loss(v, v_target)
             loss = p_loss + v_loss
 
@@ -145,11 +220,11 @@ def train_on_buffer(model, optimizer, buffer_path,
     return avg_loss, avg_p, avg_v, n
 
 
-def eval_vs_engine(model, model_size, device, num_games=20, sims=400, time_ms=500):
-    """Eval: MCTS model vs engine. Returns win rate."""
+def eval_vs_engine_python(model, model_size, device, num_pairs=10, sims=400):
+    """Python MCTS eval with color pairs."""
     from train_config_b import ConfigurableMCTS, get_engine_move
 
-    mcts = ConfigurableMCTS(
+    mcts_eval = ConfigurableMCTS(
         model, num_simulations=sims, c_puct=2.5,
         dirichlet_alpha=0.0, dirichlet_eps=0.0,
         device=device, use_amp=(device == 'cuda'),
@@ -161,10 +236,8 @@ def eval_vs_engine(model, model_size, device, num_games=20, sims=400, time_ms=50
     for f in ['nnue_weights.bin', 'egtb.bin', 'opening_book.txt']:
         src = os.path.join(engine_dir, f)
         if os.path.exists(src):
-            try:
-                os.symlink(src, os.path.join(tmpdir, f))
-            except:
-                shutil.copy2(src, os.path.join(tmpdir, f))
+            try: os.symlink(src, os.path.join(tmpdir, f))
+            except: shutil.copy2(src, os.path.join(tmpdir, f))
 
     proc = subprocess.Popen(
         [engine_path, "serve"],
@@ -177,62 +250,101 @@ def eval_vs_engine(model, model_size, device, num_games=20, sims=400, time_ms=50
             break
 
     wins, draws, losses = 0, 0, 0
-    for g in range(num_games):
-        mcts_is_white = (g % 2 == 0)
-        game = TogyzQumalaq()
-        moves = 0
+    pair_scores = []
 
-        while not game.is_terminal() and moves < 200:
-            cp_val = int(game.state.current_player)
-            mcts_turn = (cp_val == 0 and mcts_is_white) or (cp_val == 1 and not mcts_is_white)
+    for pair_id in range(num_pairs):
+        pair_score = 0
+        for color in [0, 1]:
+            mcts_is_white = (color == 0)
+            game = TogyzQumalaq()
+            moves = 0
+            while not game.is_terminal() and moves < 200:
+                cp_val = int(game.state.current_player)
+                mcts_turn = (cp_val == 0 and mcts_is_white) or (cp_val == 1 and not mcts_is_white)
+                if mcts_turn:
+                    policy = mcts_eval.search_batch([game])[0]
+                    action = int(np.argmax(policy))
+                else:
+                    action = get_engine_move(proc, game, 500)
+                    if action < 0: break
+                valid = game.get_valid_moves_list()
+                if action not in valid:
+                    action = valid[0] if valid else 0
+                game.make_move(action)
+                moves += 1
 
-            if mcts_turn:
-                policy = mcts.search_batch([game])[0]
-                action = int(np.argmax(policy))
+            winner = game.get_winner()
+            mcts_player = 0 if mcts_is_white else 1
+            if winner == 2 or winner is None:
+                draws += 1; pair_score += 0.5
+            elif winner == mcts_player:
+                wins += 1; pair_score += 1.0
             else:
-                action = get_engine_move(proc, game, time_ms)
-                if action < 0:
-                    break
-
-            valid = game.get_valid_moves_list()
-            if action not in valid:
-                action = valid[0] if valid else 0
-            game.make_move(action)
-            moves += 1
-
-        winner = game.get_winner()
-        mcts_player = 0 if mcts_is_white else 1
-        if winner == 2 or winner is None:
-            draws += 1
-        elif winner == mcts_player:
-            wins += 1
-        else:
-            losses += 1
+                losses += 1
+        pair_scores.append(pair_score)
 
     proc.terminate()
     shutil.rmtree(tmpdir, ignore_errors=True)
 
     total = wins + draws + losses
     wr = (wins + 0.5 * draws) / max(1, total) * 100
-    return wins, draws, losses, wr
+    pw = sum(1 for s in pair_scores if s > 1.0)
+    pd = sum(1 for s in pair_scores if s == 1.0)
+    pl = sum(1 for s in pair_scores if s < 1.0)
+    return wins, draws, losses, wr, pw, pd, pl
+
+
+def eval_vs_engine_rust(onnx_path, num_pairs=20, eval_sims=400, engine_time=200):
+    """Color-paired evaluation using Rust MCTS binary (much faster than Python).
+    Returns (wins, draws, losses, winrate, pair_wins, pair_draws, pair_losses).
+    """
+    import json
+
+    env = os.environ.copy()
+    env['ORT_DYLIB_PATH'] = ORT_DYLIB
+    env['LD_LIBRARY_PATH'] = CUDA_LD_PATH + ':' + env.get('LD_LIBRARY_PATH', '')
+
+    cmd = [
+        os.path.abspath(RUST_BINARY),
+        '--eval',
+        '--model', os.path.abspath(onnx_path),
+        '--games', str(num_pairs),
+        '--eval-sims', str(eval_sims),
+        '--engine', os.path.abspath(ENGINE_BINARY),
+        '--engine-time', str(engine_time),
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                           cwd=os.path.dirname(os.path.abspath(RUST_BINARY)),
+                           env=env, timeout=600)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Rust eval failed: {result.stderr[-300:]}")
+
+    # Parse JSON from stdout
+    data = json.loads(result.stdout.strip())
+    return (data['wins'], data['draws'], data['losses'], data['winrate'],
+            data['pair_wins'], data['pair_draws'], data['pair_losses'])
 
 
 def main():
-    parser = argparse.ArgumentParser(description="AlphaZero training loop v2")
+    parser = argparse.ArgumentParser(description="AlphaZero training loop v3")
     parser.add_argument("--iterations", type=int, default=500)
-    parser.add_argument("--games", type=int, default=100, help="Games per selfplay iteration")
-    parser.add_argument("--sims", type=int, default=800, help="MCTS simulations per move")
-    parser.add_argument("--workers", type=int, default=20, help="Rust worker threads")
-    parser.add_argument("--model-size", default="large2m", help="Model architecture")
-    parser.add_argument("--init-checkpoint", default=None, help="Initial PyTorch checkpoint")
-    parser.add_argument("--resume", default=None, help="Resume from training checkpoint")
-    parser.add_argument("--lr", type=float, default=0.0003, help="Learning rate")
-    parser.add_argument("--train-epochs", type=int, default=3, help="Training epochs per iteration")
-    parser.add_argument("--eval-interval", type=int, default=10, help="Eval every N iterations")
-    parser.add_argument("--eval-games", type=int, default=20, help="Games per eval")
-    parser.add_argument("--max-buffer", type=int, default=500000, help="Max replay buffer size")
-    parser.add_argument("--checkpoint-dir", default="checkpoints_2m_v2", help="Checkpoint directory")
-    parser.add_argument("--log", default="/tmp/train_loop_2m_v2.log", help="Log file")
+    parser.add_argument("--games", type=int, default=200, help="Games per selfplay iteration")
+    parser.add_argument("--sims", type=int, default=200, help="MCTS sims (full search)")
+    parser.add_argument("--workers", type=int, default=20)
+    parser.add_argument("--model-size", default="large2m")
+    parser.add_argument("--init-checkpoint", default=None)
+    parser.add_argument("--resume", default=None)
+    parser.add_argument("--lr", type=float, default=0.0002)
+    parser.add_argument("--train-epochs", type=int, default=2)
+    parser.add_argument("--eval-interval", type=int, default=10)
+    parser.add_argument("--eval-pairs", type=int, default=20, help="Color-paired eval games (total=2x)")
+    parser.add_argument("--eval-sims", type=int, default=800, help="Sims for eval (higher than selfplay)")
+    parser.add_argument("--max-buffer", type=int, default=500000)
+    parser.add_argument("--expert-ratio", type=float, default=0.2, help="Expert data mixing ratio")
+    parser.add_argument("--checkpoint-dir", default="checkpoints_v3")
+    parser.add_argument("--log", default="/tmp/train_loop_v3.log")
     args = parser.parse_args()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -246,26 +358,22 @@ def main():
         log_file.write(line + '\n')
         log_file.flush()
 
-    log(f"=== Training Loop v2 Start ===")
+    log(f"=== Training Loop v3 (No Gating) ===")
     log(f"Config: {vars(args)}")
 
-    # Create model
     model = create_model(args.model_size, device=device)
     params = sum(p.numel() for p in model.parameters())
     log(f"Model: {args.model_size} ({params:,} params)")
 
     start_iter = 0
-    best_wr = 0.0
 
-    # Load checkpoint
     if args.resume and os.path.exists(args.resume):
         cp = torch.load(args.resume, map_location=device, weights_only=False)
         sd = cp.get('model_state_dict', cp)
         cleaned = {k.replace('_orig_mod.', ''): v for k, v in sd.items()}
         model.load_state_dict(cleaned, strict=False)
         start_iter = cp.get('iteration', 0)
-        best_wr = cp.get('best_wr', 0.0)
-        log(f"Resumed from iter {start_iter}, best_wr={best_wr:.1f}%")
+        log(f"Resumed from iter {start_iter}")
     elif args.init_checkpoint and os.path.exists(args.init_checkpoint):
         cp = torch.load(args.init_checkpoint, map_location=device, weights_only=False)
         sd = cp.get('model_state_dict', cp)
@@ -274,39 +382,41 @@ def main():
         log(f"Loaded init checkpoint: {args.init_checkpoint}")
 
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-
-    # Cosine annealing scheduler
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.iterations, eta_min=args.lr * 0.1
     )
 
-    # Working files
-    best_onnx_path = os.path.join(args.checkpoint_dir, 'best.onnx')
-    current_onnx_path = os.path.join(args.checkpoint_dir, 'current.onnx')
+    # Load expert data once
+    log("Loading expert data...")
+    expert_data = load_expert_positions(max_examples=100000)
+    if expert_data is not None:
+        log(f"  Expert data: {len(expert_data[0])} positions (mixing ratio={args.expert_ratio})")
+    else:
+        log("  No expert data found")
+
+    # Working files — always use LATEST model (no gating)
+    onnx_path = os.path.join(args.checkpoint_dir, 'current.onnx')
     buffer_path = os.path.join(args.checkpoint_dir, 'replay_buffer.bin')
     accum_buffer_path = os.path.join(args.checkpoint_dir, 'accumulated_buffer.bin')
 
-    # Initial ONNX export — this is our best model for selfplay
-    export_onnx(model, best_onnx_path)
-    export_onnx(model, current_onnx_path)
+    export_onnx(model, onnx_path)
     log(f"Initial ONNX exported")
 
     total_positions = 0
-    no_improvement_count = 0
+    best_wr = 0.0
 
     for iteration in range(start_iter, args.iterations):
         iter_start = time.time()
         log(f"\n--- Iteration {iteration+1}/{args.iterations} ---")
 
-        # Step 1: Rust selfplay — ALWAYS use best model
-        selfplay_onnx = best_onnx_path if os.path.exists(best_onnx_path) else current_onnx_path
-        log(f"  Selfplay: {args.games} games, {args.sims} sims (using {'best' if selfplay_onnx == best_onnx_path else 'current'})")
+        # Step 1: Selfplay with LATEST model (no gating!)
+        log(f"  Selfplay: {args.games} games, {args.sims} sims (playout cap: 25% full, 75% fast)")
         ok, positions, sp_time = rust_selfplay(
-            selfplay_onnx, buffer_path,
+            onnx_path, buffer_path,
             games=args.games, sims=args.sims, workers=args.workers,
         )
         if not ok:
-            log(f"  Selfplay failed, skipping iteration")
+            log(f"  Selfplay failed, skipping")
             continue
 
         total_positions += positions
@@ -321,7 +431,7 @@ def main():
         else:
             shutil.copy2(buffer_path, accum_buffer_path)
 
-        # Trim accumulated buffer to max
+        # Trim
         RECORD_SIZE = 63
         accum_size = os.path.getsize(accum_buffer_path)
         accum_records = accum_size // RECORD_SIZE
@@ -333,18 +443,20 @@ def main():
                 f.write(data)
             accum_records = args.max_buffer
 
-        # Step 2: Train (on accumulated buffer with freshness weighting)
-        log(f"  Training on {accum_records} positions ({args.train_epochs} epochs, lr={optimizer.param_groups[0]['lr']:.6f})...")
+        # Step 2: Train with expert data mixing
+        lr_now = optimizer.param_groups[0]['lr']
+        log(f"  Training on {accum_records} positions ({args.train_epochs} epochs, lr={lr_now:.6f}, expert={args.expert_ratio*100:.0f}%)...")
         loss, p_loss, v_loss, n_train = train_on_buffer(
             model, optimizer, accum_buffer_path,
+            expert_data=expert_data, expert_ratio=args.expert_ratio,
             epochs=args.train_epochs, batch_size=512, device=device,
-            max_buffer=args.max_buffer, freshness_weight=True,
+            max_buffer=args.max_buffer,
         )
         scheduler.step()
         log(f"  Loss: {loss:.4f} (p={p_loss:.4f}, v={v_loss:.4f})")
 
-        # Step 3: Export current ONNX (for eval comparison)
-        export_onnx(model, current_onnx_path)
+        # Step 3: Export LATEST model for next selfplay (no gating!)
+        export_onnx(model, onnx_path)
 
         # Step 4: Save checkpoint
         if (iteration + 1) % 5 == 0:
@@ -353,47 +465,37 @@ def main():
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'iteration': iteration + 1,
-                'best_wr': best_wr,
                 'total_positions': total_positions,
             }, cp_path)
             log(f"  Checkpoint: {cp_path}")
 
-        # Always save latest
         torch.save({
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'iteration': iteration + 1,
-            'best_wr': best_wr,
             'total_positions': total_positions,
         }, os.path.join(args.checkpoint_dir, 'latest.pt'))
 
-        # Step 5: Eval with gating
+        # Step 5: Color-paired eval (monitoring only, NOT gating)
         if (iteration + 1) % args.eval_interval == 0:
-            log(f"  Evaluating vs Gen7 ({args.eval_games} games, 400 sims)...")
+            log(f"  Eval vs Gen7 ({args.eval_pairs} pairs, {args.eval_sims} sims)...")
             model.eval()
             try:
-                w, d, l, wr = eval_vs_engine(
+                w, d, l, wr, pw, pd, pl = eval_vs_engine_python(
                     model, args.model_size, device,
-                    num_games=args.eval_games, sims=400,
+                    num_pairs=args.eval_pairs, sims=args.eval_sims,
                 )
-                log(f"  Eval: {w}W-{d}D-{l}L = {wr:.1f}% vs Gen7")
+                log(f"  Eval: {w}W-{d}D-{l}L = {wr:.1f}% | Pairs: {pw}W-{pd}D-{pl}L")
 
                 if wr > best_wr:
                     best_wr = wr
-                    no_improvement_count = 0
-                    # Update best model for selfplay
-                    best_pt_path = os.path.join(args.checkpoint_dir, 'best.pt')
+                    best_path = os.path.join(args.checkpoint_dir, 'best.pt')
                     torch.save({
                         'model_state_dict': model.state_dict(),
                         'iteration': iteration + 1,
                         'best_wr': best_wr,
-                    }, best_pt_path)
-                    export_onnx(model, best_onnx_path)
-                    log(f"  NEW BEST: {wr:.1f}% — selfplay model updated!")
-                else:
-                    no_improvement_count += 1
-                    log(f"  No improvement (best={best_wr:.1f}%, streak={no_improvement_count})")
-
+                    }, best_path)
+                    log(f"  New monitoring best: {wr:.1f}%")
             except Exception as e:
                 log(f"  Eval failed: {e}")
 
@@ -401,8 +503,7 @@ def main():
         log(f"  Iter time: {iter_time:.0f}s | Total positions: {total_positions:,}")
 
     log(f"\n=== Training Complete ===")
-    log(f"Total positions generated: {total_positions:,}")
-    log(f"Best winrate vs Gen7: {best_wr:.1f}%")
+    log(f"Total positions: {total_positions:,} | Best monitoring wr: {best_wr:.1f}%")
     log_file.close()
 
 

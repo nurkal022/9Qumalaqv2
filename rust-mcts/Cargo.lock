@@ -702,6 +702,7 @@ dependencies = [
  "ort",
  "rand",
  "rand_distr",
+ "tempfile",
 ]
 
 [[package]]
