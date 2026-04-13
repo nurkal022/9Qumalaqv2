@@ -45,21 +45,27 @@ ORT_DYLIB = os.path.expanduser('~/.local/lib/python3.12/site-packages/onnxruntim
 EXPERT_DIR = os.path.join(os.path.dirname(__file__), '../../game-pars/games')
 
 
-def rust_selfplay(model_onnx, output_bin, games=200, sims=200, workers=20, batch_size=128):
-    """Run Rust MCTS self-play with playout cap randomization."""
+def rust_league(model_onnx, sp_output, eng_output,
+                selfplay_games=120, engine_games=40, sims=200,
+                workers=20, engine_workers=4, engine_time=200, batch_size=128):
+    """Run league mode: selfplay + engine games."""
     env = os.environ.copy()
     env['ORT_DYLIB_PATH'] = ORT_DYLIB
     env['LD_LIBRARY_PATH'] = CUDA_LD_PATH + ':' + env.get('LD_LIBRARY_PATH', '')
 
     cmd = [
         os.path.abspath(RUST_BINARY),
+        '--league',
         '--model', os.path.abspath(model_onnx),
-        '--games', str(games),
+        '--games', str(selfplay_games),
         '--sims', str(sims),
         '--workers', str(workers),
-        '--batch-size', str(batch_size),
-        '--output', os.path.abspath(output_bin),
-        '--dirichlet-alpha', '1.1',
+        '--engine-games', str(engine_games),
+        '--engine-workers', str(engine_workers),
+        '--engine', os.path.abspath(ENGINE_BINARY),
+        '--engine-time', str(engine_time),
+        '--output', os.path.abspath(sp_output),
+        '--engine-output', os.path.abspath(eng_output),
         '--temp-threshold', '25',
     ]
 
@@ -75,9 +81,17 @@ def rust_selfplay(model_onnx, output_bin, games=200, sims=200, workers=20, batch
             print(result.stderr[-500:])
         return False, 0, elapsed
 
+    # Count positions from both output files
     positions = 0
+    RECORD_SIZE = 63
+    for f in [sp_output, eng_output]:
+        af = os.path.abspath(f)
+        if os.path.exists(af):
+            positions += os.path.getsize(af) // RECORD_SIZE
+
+    # Also parse from stderr for backward compat
     for line in result.stderr.splitlines():
-        if 'Positions:' in line:
+        if 'positions' in line.lower() and 'Positions:' not in line:
             try:
                 positions = int(line.split('Positions:')[1].strip())
             except:
@@ -107,7 +121,7 @@ def load_expert_positions(max_examples=100000):
                 continue
             w_elo = int(headers.get('WhiteElo', '0'))
             b_elo = int(headers.get('BlackElo', '0'))
-            if w_elo < 1400 or b_elo < 1400:
+            if w_elo < 2000 or b_elo < 2000:
                 continue
 
             result_str = headers.get('Result', '')
@@ -148,13 +162,27 @@ def load_expert_positions(max_examples=100000):
 
 
 def train_on_buffer(model, optimizer, buffer_path,
+                    engine_buffer_path=None, engine_weight=3.0,
                     expert_data=None, expert_ratio=0.2,
                     max_buffer=500000, epochs=2, batch_size=512, device='cuda'):
-    """Train model on replay buffer with expert data mixing.
+    """Train model on replay buffer with engine data oversampling and expert mixing.
 
     Positions with all-zero policy (from fast playout cap) train value only.
+    Engine game positions are oversampled by engine_weight factor.
     """
     states, policies, values = load_replay_buffer(buffer_path)
+
+    # Add engine game data with oversampling
+    if engine_buffer_path and os.path.exists(engine_buffer_path) and os.path.getsize(engine_buffer_path) > 0:
+        eng_s, eng_p, eng_v = load_replay_buffer(engine_buffer_path)
+        if len(eng_s) > 0:
+            # Oversample engine data
+            repeats = max(1, int(engine_weight))
+            for _ in range(repeats):
+                states = np.concatenate([states, eng_s])
+                policies = np.concatenate([policies, eng_p])
+                values = np.concatenate([values, eng_v])
+
     n = len(states)
     if n == 0:
         return 0, 0, 0, 0
@@ -394,10 +422,12 @@ def main():
     else:
         log("  No expert data found")
 
-    # Working files — always use LATEST model (no gating)
+    # Working files
     onnx_path = os.path.join(args.checkpoint_dir, 'current.onnx')
-    buffer_path = os.path.join(args.checkpoint_dir, 'replay_buffer.bin')
+    sp_buffer_path = os.path.join(args.checkpoint_dir, 'selfplay_buffer.bin')
+    eng_buffer_path = os.path.join(args.checkpoint_dir, 'engine_buffer.bin')
     accum_buffer_path = os.path.join(args.checkpoint_dir, 'accumulated_buffer.bin')
+    accum_eng_path = os.path.join(args.checkpoint_dir, 'accumulated_engine.bin')
 
     export_onnx(model, onnx_path)
     log(f"Initial ONNX exported")
@@ -409,29 +439,42 @@ def main():
         iter_start = time.time()
         log(f"\n--- Iteration {iteration+1}/{args.iterations} ---")
 
-        # Step 1: Selfplay with LATEST model (no gating!)
-        log(f"  Selfplay: {args.games} games, {args.sims} sims (playout cap: 25% full, 75% fast)")
-        ok, positions, sp_time = rust_selfplay(
-            onnx_path, buffer_path,
-            games=args.games, sims=args.sims, workers=args.workers,
+        # Step 1: League play — selfplay + engine games
+        selfplay_games = int(args.games * 0.6)
+        engine_games = int(args.games * 0.4)
+        log(f"  League: {selfplay_games} selfplay + {engine_games} engine games ({args.sims} sims)")
+
+        ok, positions, sp_time = rust_league(
+            onnx_path, sp_buffer_path, eng_buffer_path,
+            selfplay_games=selfplay_games, engine_games=engine_games,
+            sims=args.sims, workers=args.workers, engine_workers=8, engine_time=100,
         )
         if not ok:
-            log(f"  Selfplay failed, skipping")
+            log(f"  League failed, skipping")
             continue
 
         total_positions += positions
         gps = args.games / max(0.1, sp_time)
-        log(f"  Selfplay: {positions} pos in {sp_time:.0f}s ({gps:.1f} g/s)")
+        log(f"  League: {positions} pos in {sp_time:.0f}s ({gps:.1f} g/s)")
 
-        # Accumulate buffer
+        # Accumulate selfplay buffer
         if os.path.exists(accum_buffer_path):
             with open(accum_buffer_path, 'ab') as f:
-                with open(buffer_path, 'rb') as src:
+                with open(sp_buffer_path, 'rb') as src:
                     f.write(src.read())
         else:
-            shutil.copy2(buffer_path, accum_buffer_path)
+            shutil.copy2(sp_buffer_path, accum_buffer_path)
 
-        # Trim
+        # Accumulate engine buffer
+        if os.path.exists(eng_buffer_path) and os.path.getsize(eng_buffer_path) > 0:
+            if os.path.exists(accum_eng_path):
+                with open(accum_eng_path, 'ab') as f:
+                    with open(eng_buffer_path, 'rb') as src:
+                        f.write(src.read())
+            else:
+                shutil.copy2(eng_buffer_path, accum_eng_path)
+
+        # Trim selfplay buffer
         RECORD_SIZE = 63
         accum_size = os.path.getsize(accum_buffer_path)
         accum_records = accum_size // RECORD_SIZE
@@ -443,11 +486,24 @@ def main():
                 f.write(data)
             accum_records = args.max_buffer
 
-        # Step 2: Train with expert data mixing
+        # Trim engine buffer (keep last 100K)
+        if os.path.exists(accum_eng_path):
+            eng_size = os.path.getsize(accum_eng_path)
+            eng_records = eng_size // RECORD_SIZE
+            if eng_records > 100000:
+                with open(accum_eng_path, 'rb') as f:
+                    f.seek((eng_records - 100000) * RECORD_SIZE)
+                    data = f.read()
+                with open(accum_eng_path, 'wb') as f:
+                    f.write(data)
+
+        # Step 2: Train with engine data oversampling + expert mixing
         lr_now = optimizer.param_groups[0]['lr']
-        log(f"  Training on {accum_records} positions ({args.train_epochs} epochs, lr={lr_now:.6f}, expert={args.expert_ratio*100:.0f}%)...")
+        eng_recs = os.path.getsize(accum_eng_path) // RECORD_SIZE if os.path.exists(accum_eng_path) else 0
+        log(f"  Training on {accum_records}+{eng_recs}eng positions ({args.train_epochs} epochs, lr={lr_now:.6f})...")
         loss, p_loss, v_loss, n_train = train_on_buffer(
             model, optimizer, accum_buffer_path,
+            engine_buffer_path=accum_eng_path, engine_weight=3.0,
             expert_data=expert_data, expert_ratio=args.expert_ratio,
             epochs=args.train_epochs, batch_size=512, device=device,
             max_buffer=args.max_buffer,
@@ -476,14 +532,15 @@ def main():
             'total_positions': total_positions,
         }, os.path.join(args.checkpoint_dir, 'latest.pt'))
 
-        # Step 5: Color-paired eval (monitoring only, NOT gating)
+        # Step 5: Color-paired eval via Rust 1-ply (monitoring only, NOT gating)
         if (iteration + 1) % args.eval_interval == 0:
-            log(f"  Eval vs Gen7 ({args.eval_pairs} pairs, {args.eval_sims} sims)...")
+            log(f"  Eval vs Gen7 ({args.eval_pairs} pairs, Rust 1-ply)...")
             model.eval()
             try:
-                w, d, l, wr, pw, pd, pl = eval_vs_engine_python(
-                    model, args.model_size, device,
-                    num_pairs=args.eval_pairs, sims=args.eval_sims,
+                w, d, l, wr, pw, pd, pl = eval_vs_engine_rust(
+                    onnx_path,
+                    num_pairs=args.eval_pairs, eval_sims=1,
+                    engine_time=200,
                 )
                 log(f"  Eval: {w}W-{d}D-{l}L = {wr:.1f}% | Pairs: {pw}W-{pd}D-{pl}L")
 
