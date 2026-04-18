@@ -98,9 +98,26 @@ def load_opening_book():
 
 
 def lookup_book_move(pos_string):
-    """Look up a book move. Returns (move, book_info) or (None, None)."""
+    """Look up a book move. Returns (move, book_info) or (None, None).
+
+    Only for OPENING positions (< 20 stones played).
+    Beyond that, book moves are statistical (not optimal) and cause
+    the engine to lose positions it can't recover from.
+    """
     if not opening_book:
         return None, None
+
+    # Parse position to check game phase
+    try:
+        parts = pos_string.split('/')
+        if len(parts) >= 3:
+            kazan = parts[2].split(',')
+            stones_played = int(kazan[0]) + int(kazan[1])
+            if stones_played >= 20:
+                return None, None
+    except Exception:
+        pass
+
     positions = opening_book.get('positions', {})
     entry = positions.get(pos_string)
     if not entry or entry.get('total', 0) < 3:

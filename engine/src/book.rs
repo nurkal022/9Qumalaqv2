@@ -72,7 +72,17 @@ impl OpeningBook {
 
     /// Look up a book move for the given position
     /// Returns Some(pit_index) if found, None otherwise
+    ///
+    /// Only uses book for OPENING positions (< 20 stones played).
+    /// Beyond that, the search must decide — book moves from mid-game
+    /// are based on frequency statistics, not optimal play.
     pub fn lookup(&self, board: &Board) -> Option<usize> {
+        // Opening book only: limit to early game
+        let stones_played = (board.kazan[0] as u32) + (board.kazan[1] as u32);
+        if stones_played >= 20 {
+            return None;
+        }
+
         let stm = board.side_to_move.index() as u8;
 
         for entry in &self.entries {

@@ -25,38 +25,31 @@ use crate::eval::evaluate;
 use crate::nnue::NnueNetwork;
 use crate::search::Searcher;
 
-const RECORD_SIZE: usize = 26;
+const RECORD_SIZE: usize = 27; // was 26, added best_move byte
 const TOTAL_STONES: u8 = 162;
 
-/// Pack a position into 26 bytes
+/// Pack a position into 27 bytes (added best_move at byte 26)
 fn pack_position(board: &Board, eval: i16, result: u8) -> [u8; RECORD_SIZE] {
+    pack_position_with_move(board, eval, result, 255) // 255 = no move info
+}
+
+fn pack_position_with_move(board: &Board, eval: i16, result: u8, best_move: u8) -> [u8; RECORD_SIZE] {
     let mut buf = [0u8; RECORD_SIZE];
 
-    // Pits
     for i in 0..9 {
         buf[i] = board.pits[0][i];
         buf[9 + i] = board.pits[1][i];
     }
-
-    // Kazan
     buf[18] = board.kazan[0];
     buf[19] = board.kazan[1];
-
-    // Tuzdyk
     buf[20] = board.tuzdyk[0] as u8;
     buf[21] = board.tuzdyk[1] as u8;
-
-    // Side to move
     buf[22] = board.side_to_move.index() as u8;
-
-    // Eval (i16 little-endian)
     let eval_bytes = eval.to_le_bytes();
     buf[23] = eval_bytes[0];
     buf[24] = eval_bytes[1];
-
-    // Result
     buf[25] = result;
-
+    buf[26] = best_move;
     buf
 }
 
@@ -215,7 +208,7 @@ fn play_game(
     } else {
         Board::new()
     };
-    let mut positions: Vec<(Board, i16)> = Vec::with_capacity(120);
+    let mut positions: Vec<(Board, i16, u8)> = Vec::with_capacity(120);
     let mut ply = 0;
 
     // Random opening: first N plies are random moves (fewer for endgame starts)
@@ -261,7 +254,7 @@ fn play_game(
         };
         let eval = (raw_score as f64 * eval_scale).clamp(-3000.0, 3000.0) as i16;
         if result.score.abs() < 50000 {
-            positions.push((board, eval));
+            positions.push((board, eval, result.best_move as u8));
         }
 
         // Adjudication: stop if one side is clearly winning for several plies
@@ -301,10 +294,10 @@ fn play_game(
         1u8 // draw by max plies
     };
 
-    // Pack all positions with the game result
+    // Pack all positions with the game result and best move
     positions
         .iter()
-        .map(|(b, eval)| pack_position(b, *eval, result_byte))
+        .map(|(b, eval, best_move)| pack_position_with_move(b, *eval, result_byte, *best_move))
         .collect()
 }
 
