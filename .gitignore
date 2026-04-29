@@ -101,3 +101,11 @@ Thumbs.db
 
 # Archive of historical/experimental material (out-of-tree, not committed)
 archive/
+
+# rust-mcts working-tree-only assets (large binaries / build outputs)
+rust-mcts/target/
+rust-mcts/checkpoints_v3/
+rust-mcts/*.trt
+
+# web runtime output
+web/games_log/
