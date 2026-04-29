@@ -98,3 +98,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Archive of historical/experimental material (out-of-tree, not committed)
+archive/
