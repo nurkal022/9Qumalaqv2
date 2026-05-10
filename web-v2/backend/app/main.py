@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
 from app.auth.anonymous import resolve_session, attach_anon_cookie_if_new
+from app.auth import routes as auth_routes
+from app.errors import install_handlers
 
 
 class SessionMiddleware(BaseHTTPMiddleware):
@@ -15,6 +17,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="Togyzkumalak web-v2 API", version="0.1.0")
+    install_handlers(app)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
@@ -23,6 +26,8 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(SessionMiddleware)
+
+    app.include_router(auth_routes.router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
