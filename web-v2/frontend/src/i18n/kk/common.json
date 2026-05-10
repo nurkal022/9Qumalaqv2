@@ -22,5 +22,12 @@
   "lobby.start": "Бастау",
   "lobby.side": "Сіздің тарап",
   "lobby.sideWhite": "Ақ (бірінші)",
-  "lobby.sideBlack": "Қара (екінші)"
+  "lobby.sideBlack": "Қара (екінші)",
+  "common.loading": "Жүктелуде...",
+  "game.undo": "Кері қайтару",
+  "game.moveList": "Жүрістер тізімі",
+  "game.wsStatus": "Қосылым: {{status}}",
+  "game.result.win_white": "Ақ жеңді",
+  "game.result.win_black": "Қара жеңді",
+  "game.result.draw": "Тең"
 }

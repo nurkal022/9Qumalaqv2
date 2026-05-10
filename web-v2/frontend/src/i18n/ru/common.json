@@ -22,5 +22,12 @@
   "lobby.start": "Начать",
   "lobby.side": "Ваша сторона",
   "lobby.sideWhite": "Белые (первые)",
-  "lobby.sideBlack": "Чёрные (вторые)"
+  "lobby.sideBlack": "Чёрные (вторые)",
+  "common.loading": "Загрузка...",
+  "game.undo": "Отменить",
+  "game.moveList": "Список ходов",
+  "game.wsStatus": "Соединение: {{status}}",
+  "game.result.win_white": "Победа белых",
+  "game.result.win_black": "Победа чёрных",
+  "game.result.draw": "Ничья"
 }
