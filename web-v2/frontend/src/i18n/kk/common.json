@@ -1,0 +1,13 @@
+{
+  "app.title": "Тоғызқұмалақ",
+  "lobby.newGame": "Жаңа партия",
+  "lobby.engineLevel": "Қозғалтқыш деңгейі",
+  "common.easy": "Жеңіл",
+  "common.normal": "Орташа",
+  "common.hard": "Қиын",
+  "errors.engine_unavailable": "Қозғалтқыш қол жетімсіз",
+  "engine.thinking": "Ойланып жатыр…",
+  "game.resign": "Бас тарту",
+  "game.draw": "Тең",
+  "game.hint": "Ишара"
+}

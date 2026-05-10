@@ -1,0 +1,13 @@
+{
+  "app.title": "Тогызкумалак",
+  "lobby.newGame": "Новая партия",
+  "lobby.engineLevel": "Уровень движка",
+  "common.easy": "Лёгкий",
+  "common.normal": "Средний",
+  "common.hard": "Сложный",
+  "errors.engine_unavailable": "Движок недоступен",
+  "engine.thinking": "Думает…",
+  "game.resign": "Сдаться",
+  "game.draw": "Ничья",
+  "game.hint": "Подсказка"
+}
