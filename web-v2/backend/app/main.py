@@ -12,6 +12,7 @@ from app.auth.anonymous import resolve_session, attach_anon_cookie_if_new
 from app.auth import routes as auth_routes
 from app.engine.pool import EnginePool
 from app.errors import install_handlers
+from app.middleware import RequestLogMiddleware
 
 
 limiter = Limiter(key_func=get_remote_address)
@@ -50,6 +51,7 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     app.add_middleware(SessionMiddleware)
+    app.add_middleware(RequestLogMiddleware)
 
     app.state.limiter = limiter
 
