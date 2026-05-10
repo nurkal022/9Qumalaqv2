@@ -4,7 +4,7 @@ from app.auth.schemas import RegisterReq, LoginReq, UserOut, MeOut
 from app.auth.session import CurrentSession
 from app.auth.jwt import encode_user
 from app.auth.anonymous import COOKIE_JWT
-from app.auth.service import register as svc_register, login as svc_login
+from app.auth.service import register as svc_register, login as svc_login, migrate_anon_games
 from app.deps import get_db, get_session
 from app.config import settings
 
@@ -30,10 +30,14 @@ async def register(req: RegisterReq, response: Response, sess: CurrentSession = 
 
 
 @router.post("/login")
-async def login(req: LoginReq, response: Response, db: AsyncSession = Depends(get_db)):
+async def login(req: LoginReq, response: Response, sess: CurrentSession = Depends(get_session), db: AsyncSession = Depends(get_db)):
     user = await svc_login(db, username=req.username, password=req.password)
+    migrated = 0
+    if sess.anon:
+        migrated = await migrate_anon_games(db, user_id=user.id, anon_session_id=sess.anon.id)
+        await db.commit()
     _set_jwt(response, user.id)
-    return {"user": UserOut.model_validate(user, from_attributes=True)}
+    return {"user": UserOut.model_validate(user, from_attributes=True), "migratedGamesCount": migrated}
 
 
 @router.post("/logout", status_code=204)

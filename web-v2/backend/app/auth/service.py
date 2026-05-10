@@ -13,6 +13,13 @@ def verify_password(pw: str, hashed: str) -> bool:
     return bcrypt.checkpw(pw.encode(), hashed.encode())
 
 
+async def migrate_anon_games(s: AsyncSession, *, user_id: int, anon_session_id: str) -> int:
+    result = await s.execute(
+        update(Game).where(Game.anon_session_id == anon_session_id).values(user_id=user_id, anon_session_id=None)
+    )
+    return result.rowcount or 0
+
+
 async def register(s: AsyncSession, *, username: str, password: str, locale: str, anon_session_id: str | None) -> tuple[User, int]:
     existing = (await s.execute(select(User).where(User.username == username))).scalar_one_or_none()
     if existing:
@@ -22,12 +29,7 @@ async def register(s: AsyncSession, *, username: str, password: str, locale: str
     await s.flush()
     migrated = 0
     if anon_session_id:
-        result = await s.execute(
-            update(Game)
-            .where(Game.anon_session_id == anon_session_id)
-            .values(user_id=user.id, anon_session_id=None)
-        )
-        migrated = result.rowcount or 0
+        migrated = await migrate_anon_games(s, user_id=user.id, anon_session_id=anon_session_id)
     await s.commit()
     await s.refresh(user)
     return user, migrated
