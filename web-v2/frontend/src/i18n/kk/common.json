@@ -9,5 +9,11 @@
   "engine.thinking": "Ойланып жатыр…",
   "game.resign": "Бас тарту",
   "game.draw": "Тең",
-  "game.hint": "Ишара"
+  "game.hint": "Ишара",
+  "history.title": "Тарих",
+  "auth.login": "Кіру",
+  "auth.register": "Тіркелу",
+  "auth.logout": "Шығу",
+  "auth.username": "Логин",
+  "auth.password": "Құпия сөз"
 }

@@ -9,5 +9,11 @@
   "engine.thinking": "Думает…",
   "game.resign": "Сдаться",
   "game.draw": "Ничья",
-  "game.hint": "Подсказка"
+  "game.hint": "Подсказка",
+  "history.title": "История",
+  "auth.login": "Войти",
+  "auth.register": "Зарегистрироваться",
+  "auth.logout": "Выйти",
+  "auth.username": "Логин",
+  "auth.password": "Пароль"
 }
