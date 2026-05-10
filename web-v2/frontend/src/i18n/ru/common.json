@@ -15,5 +15,12 @@
   "auth.register": "Зарегистрироваться",
   "auth.logout": "Выйти",
   "auth.username": "Логин",
-  "auth.password": "Пароль"
+  "auth.password": "Пароль",
+  "lobby.clock": "Часы",
+  "lobby.noClock": "Без часов",
+  "lobby.useBook": "Дебютная книга",
+  "lobby.start": "Начать",
+  "lobby.side": "Ваша сторона",
+  "lobby.sideWhite": "Белые (первые)",
+  "lobby.sideBlack": "Чёрные (вторые)"
 }

@@ -15,5 +15,12 @@
   "auth.register": "Тіркелу",
   "auth.logout": "Шығу",
   "auth.username": "Логин",
-  "auth.password": "Құпия сөз"
+  "auth.password": "Құпия сөз",
+  "lobby.clock": "Сағат",
+  "lobby.noClock": "Сағатсыз",
+  "lobby.useBook": "Дебют кітабы",
+  "lobby.start": "Бастау",
+  "lobby.side": "Сіздің тарап",
+  "lobby.sideWhite": "Ақ (бірінші)",
+  "lobby.sideBlack": "Қара (екінші)"
 }
