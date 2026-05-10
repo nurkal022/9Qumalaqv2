@@ -29,5 +29,6 @@
   "game.wsStatus": "Соединение: {{status}}",
   "game.result.win_white": "Победа белых",
   "game.result.win_black": "Победа чёрных",
-  "game.result.draw": "Ничья"
+  "game.result.draw": "Ничья",
+  "history.empty": "Ещё не играли"
 }
