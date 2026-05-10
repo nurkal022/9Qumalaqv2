@@ -22,10 +22,10 @@ class LoginReq(BaseModel):
 class UserOut(BaseModel):
     id: int
     username: str
-    displayName: str | None = Field(default=None, alias="display_name")
+    display_name: str | None = Field(default=None, serialization_alias="displayName")
     locale: str
 
-    model_config = {"from_attributes": True, "populate_by_name": True}
+    model_config = {"from_attributes": True}
 
 
 class MeOut(BaseModel):

@@ -22,3 +22,12 @@ async def test_username_taken(client):
     r = await client.post("/api/auth/register", json={"username": "carol", "password": "secret123"})
     assert r.status_code == 409
     assert r.json()["error"]["code"] == "username_taken"
+
+
+async def test_user_response_uses_camelCase_keys(client):
+    r = await client.post("/api/auth/register", json={"username": "kasey", "password": "secret123"})
+    body = r.json()
+    assert "user" in body
+    user = body["user"]
+    assert "displayName" in user, f"expected displayName key, got: {list(user.keys())}"
+    assert "display_name" not in user, f"snake_case key leaked: {list(user.keys())}"
