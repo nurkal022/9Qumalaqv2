@@ -66,6 +66,9 @@ def create_app() -> FastAPI:
     from app.ws import games_ws
     app.include_router(games_ws.router)
 
+    from app.games import routes as games_routes
+    app.include_router(games_routes.router)
+
     @app.get("/api/health")
     async def health() -> dict[str, str]:
         return {"status": "ok"}
