@@ -2,12 +2,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from app.config import settings
 from app.auth.anonymous import resolve_session, attach_anon_cookie_if_new
 from app.auth import routes as auth_routes
 from app.engine.pool import EnginePool
 from app.errors import install_handlers
+
+
+limiter = Limiter(key_func=get_remote_address)
 
 
 class SessionMiddleware(BaseHTTPMiddleware):
@@ -44,7 +51,17 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(SessionMiddleware)
 
+    app.state.limiter = limiter
+
+    @app.exception_handler(RateLimitExceeded)
+    async def _rate(_, __):
+        from app.errors import _envelope
+        return JSONResponse(status_code=429, content=_envelope("rate_limited"))
+
     app.include_router(auth_routes.router)
+
+    from app.play import routes as play_routes
+    app.include_router(play_routes.router)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:

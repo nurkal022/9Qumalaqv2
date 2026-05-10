@@ -60,7 +60,7 @@ class NewGameReq(BaseModel):
 
 
 class MoveReq(BaseModel):
-    moveUci: str = Field(min_length=2, max_length=8)
+    moveUci: str = Field(min_length=1, max_length=8)
 
 
 class TakebackReq(BaseModel):
