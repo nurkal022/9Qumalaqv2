@@ -1,4 +1,5 @@
 import { createHashRouter, RouterProvider, Outlet } from "react-router";
+import { Toaster } from "sonner";
 import Header from "./components/layout/Header";
 import Lobby from "./routes/Lobby";
 import Game from "./routes/Game";
@@ -36,5 +37,10 @@ const router = createHashRouter([
 ]);
 
 export default function App() {
-  return <RouterProvider router={router} />;
+  return (
+    <>
+      <RouterProvider router={router} />
+      <Toaster richColors theme="dark" position="top-center" />
+    </>
+  );
 }
