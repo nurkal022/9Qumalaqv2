@@ -7,8 +7,10 @@ import Replay from "./routes/Replay";
 import Login from "./routes/Login";
 import Register from "./routes/Register";
 import Profile from "./routes/Profile";
+import { useAuthBootstrap } from "./hooks/useAuth";
 
 function Layout() {
+  useAuthBootstrap();
   return (
     <div className="min-h-screen flex flex-col">
       <Header />
