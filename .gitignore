@@ -109,3 +109,9 @@ rust-mcts/*.trt
 
 # web runtime output
 web/games_log/
+
+# web-v2 dev artifacts
+web-v2/backend/.venv/
+web-v2/backend/*.db*
+web-v2/frontend/node_modules/
+web-v2/frontend/dist/
