@@ -1,6 +1,16 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
+from app.auth.anonymous import resolve_session, attach_anon_cookie_if_new
+
+
+class SessionMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        request.state.session = await resolve_session(request)
+        response = await call_next(request)
+        attach_anon_cookie_if_new(request, response)
+        return response
 
 
 def create_app() -> FastAPI:
@@ -12,6 +22,7 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(SessionMiddleware)
 
     @app.get("/api/health")
     async def health() -> dict[str, str]:
