@@ -1,4 +1,4 @@
-mod board;
+pub(crate) use togyzkumalaq_core as board;
 mod book;
 mod datagen;
 mod egtb;

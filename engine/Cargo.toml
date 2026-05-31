@@ -4,6 +4,7 @@ version = "1.0.0"
 edition = "2021"
 
 [dependencies]
+togyzkumalaq-core = { path = "../core" }
 
 [profile.release]
 opt-level = 3
