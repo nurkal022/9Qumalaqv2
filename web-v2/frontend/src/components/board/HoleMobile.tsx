@@ -1,5 +1,5 @@
 import { motion } from "framer-motion";
-import Pebbles from "./Pebbles";
+import PebblesMobile from "./PebblesMobile";
 
 type Actor = "human" | "engine";
 
@@ -7,15 +7,15 @@ type Props = {
   pebbles: number;
   interactive: boolean;
   isTuz?: boolean;
-  /** 1-9 displayed pit number (engraved on the wood) */
+  /** 1-9 displayed pit number engraved on the wood next to the chamber */
   displayIndex: number;
-  /** Where the numeral sits relative to the chamber */
-  numeralPosition: "above" | "below";
+  /** Numeral position relative to the chamber */
+  numeralPosition: "left" | "right";
   /** Hide the numeral (Settings → showCoordinates off) */
   showNumeral?: boolean;
-  /** This pit is currently being acted on by the sowing animation */
+  /** Sowing-animation step is currently acting on this pit */
   isActive?: boolean;
-  /** Whose stone is acting on this pit (decides pulse color) */
+  /** Whose stone is acting (decides pulse color) */
   activeActor?: Actor;
   onClick?: () => void;
 };
@@ -26,10 +26,11 @@ const PULSE_RGB: Record<Actor, string> = {
 };
 
 /**
- * Desktop pit: tall vertical capsule with numeral above/below the chamber.
- * For mobile/portrait the parallel component is HoleMobile.
+ * Mobile pit — wide horizontal capsule. The numeral sits LEFT or RIGHT of
+ * the chamber so it stays readable in portrait. PebblesMobile lays the
+ * stones in a 5×2 grid with the count badge on the right.
  */
-export default function Hole({
+export default function HoleMobile({
   pebbles,
   interactive,
   isTuz,
@@ -61,27 +62,27 @@ export default function Hole({
       animate={animateProp}
       transition={{ duration: 0.45, ease: "easeOut" }}
       className={[
-        "pit-chamber relative w-full rounded-[1.1rem] flex items-center justify-center",
-        "aspect-[3/8]",
+        "pit-chamber relative w-full rounded-[1.1rem] flex items-center",
+        "aspect-[8/3]",
         interactive ? "is-interactive" : "",
         isTuz ? "is-tuz" : "",
       ].filter(Boolean).join(" ")}
     >
-      <Pebbles count={pebbles} variant="pit" />
+      <PebblesMobile count={pebbles} />
     </motion.button>
   );
 
   const numeral = showNumeral ? (
-    <span className="pit-numeral text-sm sm:text-base leading-none select-none">
+    <span className="pit-numeral text-sm leading-none select-none w-4 text-center shrink-0">
       {displayIndex}
     </span>
   ) : null;
 
   return (
-    <div className="flex flex-col items-center gap-1.5 min-w-0">
-      {numeralPosition === "above" && numeral}
-      {chamber}
-      {numeralPosition === "below" && numeral}
+    <div className="flex items-center gap-1.5 min-w-0 w-full">
+      {numeralPosition === "left" && numeral}
+      <div className="flex-1 min-w-0">{chamber}</div>
+      {numeralPosition === "right" && numeral}
     </div>
   );
 }

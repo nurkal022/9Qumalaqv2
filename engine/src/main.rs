@@ -24,6 +24,79 @@ fn load_book() -> Option<OpeningBook> {
     OpeningBook::load(BOOK_PATH)
 }
 
+/// Simple xor-shift PRNG seeded from system time. We don't need crypto-grade
+/// randomness — just enough variation between game positions.
+fn rand_u64() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static SEED: AtomicU64 = AtomicU64::new(0);
+    let mut s = SEED.load(Ordering::Relaxed);
+    if s == 0 {
+        s = SystemTime::now().duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64).unwrap_or(0xDEADBEEF) | 1;
+    }
+    // xorshift64
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    SEED.store(s, Ordering::Relaxed);
+    s
+}
+
+/// Pick a move from the scored candidates with creativity-controlled randomness.
+///   level 1: light  — uniform sample among moves within 30 cp of best
+///   level 2: medium — softmax sample among moves within 60 cp, temperature 30
+///   level 3: high   — softmax sample among moves within 100 cp, temperature 60
+/// Mate-zone scores (|score| > EVAL_MATE - 200) are NEVER randomized — we play strict
+/// to convert wins and not blunder mate.
+fn pick_creative(scored: &[(usize, i32)], level: u32, best_score: i32) -> usize {
+    if scored.is_empty() {
+        return 0;
+    }
+    // Mate-zone: don't gamble with wins/losses
+    if best_score.abs() > 90_000 - 200 {
+        return scored[0].0;
+    }
+    let (window_cp, temp_cp): (i32, f64) = match level {
+        1 => (30, 0.0),     // uniform within window
+        2 => (60, 30.0),    // softmax, modest temperature
+        3 => (100, 60.0),   // softmax, hotter
+        _ => return scored[0].0,
+    };
+    let top_score = scored[0].1;
+    // Candidates within window of best
+    let candidates: Vec<&(usize, i32)> = scored.iter()
+        .filter(|(_, s)| top_score - s <= window_cp)
+        .collect();
+    if candidates.len() == 1 {
+        return candidates[0].0;
+    }
+
+    let r = (rand_u64() as f64) / (u64::MAX as f64);  // [0, 1)
+
+    if temp_cp <= 0.0 {
+        // Uniform among candidates
+        let idx = (r * candidates.len() as f64) as usize;
+        return candidates[idx.min(candidates.len() - 1)].0;
+    }
+
+    // Softmax weights based on score gap
+    let mut weights: Vec<f64> = candidates.iter()
+        .map(|(_, s)| ((-(top_score - *s) as f64) / temp_cp).exp())
+        .collect();
+    let total: f64 = weights.iter().sum();
+    for w in weights.iter_mut() { *w /= total; }
+
+    let mut acc = 0.0;
+    for (i, w) in weights.iter().enumerate() {
+        acc += w;
+        if r <= acc {
+            return candidates[i].0;
+        }
+    }
+    candidates[candidates.len() - 1].0
+}
+
 fn load_egtb() -> Option<Arc<egtb::EndgameTablebase>> {
     if std::path::Path::new(EGTB_PATH).exists() {
         match egtb::EndgameTablebase::load(EGTB_PATH) {
@@ -151,6 +224,12 @@ fn print_usage() {
 }
 
 fn get_num_threads() -> usize {
+    // ENGINE_THREADS env var allows pool-friendly limiting
+    if let Ok(s) = std::env::var("ENGINE_THREADS") {
+        if let Ok(n) = s.parse::<usize>() {
+            if n >= 1 { return n; }
+        }
+    }
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
 }
 
@@ -662,7 +741,11 @@ fn run_serve() {
     let stdout = io::stdout();
     let num_threads = get_num_threads();
 
-    let mut searcher = Searcher::new(64);
+    // Pool-friendly: 1GB TT per engine (3 engines × 1GB = 3GB total)
+    // Reads TT_SIZE_MB env var for override (default 1024 MB)
+    let tt_mb: usize = std::env::var("TT_SIZE_MB")
+        .ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
+    let mut searcher = Searcher::new(tt_mb);
     if let Some(nnue) = load_nnue() {
         searcher.set_nnue(nnue);
     }
@@ -720,6 +803,7 @@ fn run_serve() {
             "go" => {
                 let mut time_ms: u64 = 3000;
                 let mut pos_str = "";
+                let mut nobook: bool = false;
                 let mut i = 1;
                 while i < parts.len() {
                     match parts[i] {
@@ -734,6 +818,10 @@ fn run_serve() {
                                 pos_str = parts[i + 1];
                             }
                             i += 2;
+                        }
+                        "nobook" => {
+                            nobook = true;
+                            i += 1;
                         }
                         _ => {
                             i += 1;
@@ -755,11 +843,14 @@ fn run_serve() {
                             writeln!(out, "terminal {}", result_str).unwrap();
                             out.flush().unwrap();
                         } else {
+                            searcher.skip_book = nobook;
                             let result = searcher.search_smp(&board, 30, time_ms, num_threads);
+                            searcher.skip_book = false;
+                            let chosen_move = result.best_move;
 
                             // Push resulting position to game history
                             let mut new_board = board;
-                            new_board.make_move(result.best_move);
+                            new_board.make_move(chosen_move);
                             let new_hash = searcher.compute_hash(&new_board);
                             searcher.push_game_position(new_hash);
 
@@ -773,7 +864,7 @@ fn run_serve() {
                             writeln!(
                                 out,
                                 "bestmove {} score {} depth {} nodes {} time {} nps {}",
-                                result.best_move,
+                                chosen_move,
                                 result.score,
                                 result.depth,
                                 result.nodes,

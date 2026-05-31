@@ -10,6 +10,7 @@ import Register from "./routes/Register";
 import Profile from "./routes/Profile";
 import { useAuthBootstrap } from "./hooks/useAuth";
 import OrnamentBorder from "./components/layout/OrnamentBorder";
+import SettingsModal from "./components/settings/SettingsModal";
 
 function Layout() {
   useAuthBootstrap();
@@ -18,6 +19,7 @@ function Layout() {
       <Header />
       <OrnamentBorder />
       <main className="flex-1"><Outlet /></main>
+      <SettingsModal />
     </div>
   );
 }

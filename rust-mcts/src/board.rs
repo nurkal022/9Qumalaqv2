@@ -42,7 +42,7 @@ pub struct UndoInfo {
     pub pit_index: usize,
     pub stones_picked: u8,
     pub captured: u8,            // stones captured (even count or tuzdyk)
-    pub tuzdyk_created: i8,      // pit index if tuzdyk was created, -1 otherwise
+    pub prev_tuzdyk: [i8; 2],    // tuzdyk state before the move (for precise unmake)
     pub side: Side,
     // Snapshot of affected pits for precise unmake
     pub prev_pits: [[u8; NUM_PITS]; 2],
@@ -124,7 +124,7 @@ impl Board {
             pit_index,
             stones_picked: self.pits[me][pit_index],
             captured: 0,
-            tuzdyk_created: -1,
+            prev_tuzdyk: self.tuzdyk,
             side: self.side_to_move,
             prev_pits: self.pits,
             prev_kazan: self.kazan,
@@ -210,10 +210,7 @@ impl Board {
     pub fn unmake_move(&mut self, undo: &UndoInfo) {
         self.pits = undo.prev_pits;
         self.kazan = undo.prev_kazan;
-        if undo.tuzdyk_created >= 0 {
-            let me = undo.side.index();
-            self.tuzdyk[me] = -1;
-        }
+        self.tuzdyk = undo.prev_tuzdyk;
         self.side_to_move = undo.side;
         self.move_count -= 1;
     }
@@ -463,5 +460,54 @@ mod tests {
 
         assert_eq!(b.tuzdyk[0], -1); // no tuzdyk created
         assert_eq!(b.pits[1][8], 3); // stones stay
+    }
+
+    #[test]
+    fn test_unmake_restores_tuzdyk() {
+        // Move that CREATES a tuzdyk must be fully reversible.
+        let mut b = Board::new();
+        b.pits[0] = [0, 0, 0, 0, 0, 0, 0, 0, 2]; // pit 9 has 2 stones
+        b.pits[1] = [2, 0, 0, 0, 0, 0, 0, 0, 0]; // opp pit 1 has 2
+        b.kazan = [75, 75];
+        let snapshot = b;
+
+        let undo = b.make_move(8); // wraps to opp pit 1 -> 3 -> tuzdyk
+        assert_eq!(b.tuzdyk[0], 0, "precondition: tuzdyk created");
+
+        b.unmake_move(&undo);
+        assert_eq!(b, snapshot, "unmake must fully restore the board, including tuzdyk");
+    }
+
+    #[test]
+    fn test_make_unmake_symmetry_and_stone_conservation() {
+        // Pseudo-random walk: every make+unmake must restore the board exactly,
+        // and the 162 stones must be conserved (pits + both kazans) at all times.
+        fn total(b: &Board) -> u16 {
+            b.total_board_stones() + b.kazan[0] as u16 + b.kazan[1] as u16
+        }
+        let mut b = Board::new();
+        assert_eq!(total(&b), 162);
+        let mut moves = [0usize; NUM_PITS];
+        let mut seed: u64 = 0x9e3779b97f4a7c15;
+        for _ in 0..1000 {
+            if b.is_terminal() {
+                b = Board::new();
+            }
+            let n = b.valid_moves_array(&mut moves);
+            if n == 0 {
+                b = Board::new();
+                continue;
+            }
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let pit = moves[(seed >> 33) as usize % n];
+            let before = b;
+            let undo = b.make_move(pit);
+            assert_eq!(total(&b), 162, "stones not conserved after make from pit {}", pit);
+            b.unmake_move(&undo);
+            assert_eq!(b, before, "make+unmake not symmetric for pit {}", pit);
+            b.make_move(pit); // advance for real
+        }
     }
 }

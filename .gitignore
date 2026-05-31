@@ -115,3 +115,24 @@ web-v2/backend/.venv/
 web-v2/backend/*.db*
 web-v2/frontend/node_modules/
 web-v2/frontend/dist/
+
+# --- restructure: heavy artifacts (never commit) ---
+6666.apk
+*.apk
+Togyz/
+/alphazero-code
+/game-pars
+rust-mcts/checkpoints_night/
+rust-mcts/eval_results*.txt
+rust-mcts/final_eval.txt
+
+# --- restructure: forward-looking layout ignores ---
+target/
+**/__pycache__/
+**/node_modules/
+**/dist/
+*.db
+datasets/**
+research/runs/**
+!research/runs/**/config.yaml
+!research/runs/**/summary.md

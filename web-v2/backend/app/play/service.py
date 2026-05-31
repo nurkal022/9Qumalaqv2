@@ -7,7 +7,7 @@ from app.errors import AppError
 from app.play.clock import apply_move_to_clock
 
 
-LEVEL_TO_MS = {"easy": 500, "normal": 2000, "hard": 8000}
+LEVEL_TO_MS = {"test": 80, "easy": 300, "normal": 1500, "hard": 6000}
 
 
 async def create_game(s: AsyncSession, *, owner: dict, side: int, engine_level: str,

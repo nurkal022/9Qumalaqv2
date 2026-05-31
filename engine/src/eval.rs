@@ -85,7 +85,7 @@ pub fn evaluate(board: &Board) -> i32 {
     let opp_pit_stones: i32 = board.pits[opp].iter().map(|&x| x as i32).sum();
     score += (my_pit_stones - opp_pit_stones) * PIT_STONES_WEIGHT;
 
-    // 5. Mobility
+    // 5. Mobility — critical in late game (tempo play)
     let mut my_moves = 0i32;
     let mut opp_moves = 0i32;
     let opp_tuzdyk = board.tuzdyk[opp];
@@ -99,7 +99,56 @@ pub fn evaluate(board: &Board) -> i32 {
             opp_moves += 1;
         }
     }
-    score += (my_moves - opp_moves) * MOBILITY_WEIGHT;
+
+    // Mobility weight scales with stones-on-board (data-tuned from 360K PlayOK games):
+    //   ≤ 60 stones: ×2 — entering tempo phase (median ply 47, 92% of pro games reach this)
+    //   ≤ 40 stones: ×3 — main tempo battle (61% of pro games, last-capture median: 37 stones)
+    //   ≤ 25 stones: ×5 — critical zugzwang risk (rare but decisive)
+    // Note: ply count not used; stones-on-board is what actually matters.
+    let total_board = (my_pit_stones + opp_pit_stones) as i32;
+    let mobility_mult = if total_board <= 25 {
+        5
+    } else if total_board <= 40 {
+        3
+    } else if total_board <= 60 {
+        2
+    } else {
+        1
+    };
+    score += (my_moves - opp_moves) * MOBILITY_WEIGHT * mobility_mult;
+
+    // Late-phase pit-asymmetry bonus (from 360K analysis):
+    // 21% of pro games end with kazan spread ≤5 — decided purely by who emptied first.
+    // Stones on YOUR pits at game end almost always become yours (sweep rule).
+    // So in tempo phase, a stone on my side is worth more than a stone on opp's side.
+    if total_board <= 60 {
+        let pit_asymmetry = my_pit_stones as i32 - opp_pit_stones as i32;
+        let asym_weight = if total_board <= 25 { 12 }
+                          else if total_board <= 40 { 8 }
+                          else { 4 };
+        score += pit_asymmetry * asym_weight;
+    }
+
+    // CRITICAL: heavy penalty if I have very few moves vs opponent
+    // This prevents engine from "winning material but losing on moves"
+    if my_moves <= 3 && opp_moves > my_moves {
+        let deficit = opp_moves - my_moves;
+        // Quadratic penalty when low on moves
+        score -= deficit * deficit * 80;
+    }
+    if opp_moves <= 3 && my_moves > opp_moves {
+        let advantage = my_moves - opp_moves;
+        score += advantage * advantage * 80;
+    }
+
+    // EXTREMELY CRITICAL: I'm about to run out of moves
+    // When opponent forces me to empty my last pits while keeping their reserves
+    if my_moves <= 1 && total_board > 5 {
+        score -= 600;  // about to lose by zugzwang
+    }
+    if opp_moves <= 1 && total_board > 5 {
+        score += 600;  // opponent about to lose by zugzwang
+    }
 
     // 6. Empty pit penalty
     for i in 0..NUM_PITS {
@@ -141,15 +190,26 @@ pub fn evaluate(board: &Board) -> i32 {
         }
     }
 
-    // 9. Starvation pressure — keeping opponent's side empty is critical
-    //    When opponent has few stones, each stone less is exponentially more valuable
-    //    because at 0 stones the game ends (we win if ahead in kazan)
-    if opp_pit_stones <= 9 {
-        let pressure = 10 - opp_pit_stones;
+    // 9. Starvation pressure — keeping opponent's side empty wins by zugzwang.
+    //    Two-stage: gradual linear ramp (kicks in at 18 stones), then quadratic explosion (≤9).
+    //    Data: 21% of pro games end with kazan spread ≤5 → decided by who emptied first.
+    //    Median end-of-material has 37 total stones on board, so ~18-19 per side is "warning zone".
+    let opp_p = opp_pit_stones as i32;
+    let my_p = my_pit_stones as i32;
+    if opp_p <= 18 {
+        // Linear pre-warning gradient
+        score += (18 - opp_p) * 6;
+    }
+    if my_p <= 18 {
+        score -= (18 - my_p) * 6;
+    }
+    if opp_p <= 9 {
+        // Quadratic explosion — close to terminal
+        let pressure = 10 - opp_p;
         score += pressure * pressure * STARVATION_WEIGHT;
     }
-    if my_pit_stones <= 9 {
-        let pressure = 10 - my_pit_stones;
+    if my_p <= 9 {
+        let pressure = 10 - my_p;
         score -= pressure * pressure * STARVATION_WEIGHT;
     }
 
@@ -170,12 +230,11 @@ pub fn evaluate(board: &Board) -> i32 {
         score += (my_right - opp_right) * 3;
     }
 
-    // 12. Midgame positional eval (ply 30-60: board mass, heavy pits, scatter penalty)
-    let ply = board.move_count;
-    if ply >= 30 && ply <= 60 {
-        // Board mass bonus: keeping stones on our side = more options
-        score += (my_pit_stones - opp_pit_stones) * 2;
-
+    // 12. Midgame positional eval (stones 50-100: heavy pits, scatter penalty, right-pit)
+    //     Switched from ply count to stones-on-board: data shows ply 30 ≈ 80 stones,
+    //     ply 60 ≈ 52 stones (median). Stone-based threshold is more robust.
+    //     Pit-asymmetry is already handled in section 5 (≤60), so not duplicated here.
+    if total_board >= 50 && total_board <= 100 {
         // Heavy pit bonus: pits with 10+ stones are tactical weapons
         for i in 0..NUM_PITS {
             if board.pits[me][i] >= 10 {
@@ -204,7 +263,7 @@ pub fn evaluate(board: &Board) -> i32 {
             score += (opp_scattered - 4) * 10;
         }
 
-        // Right-pit bonus in midgame too (lower weight)
+        // Right-pit bonus in midgame (lower weight than endgame)
         let my_right: i32 = board.pits[me][6..9].iter().map(|&x| x as i32).sum();
         let opp_right: i32 = board.pits[opp][6..9].iter().map(|&x| x as i32).sum();
         score += (my_right - opp_right) * 2;

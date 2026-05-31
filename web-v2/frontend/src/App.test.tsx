@@ -4,8 +4,8 @@ import "./i18n";
 
 test("renders Lobby on /", () => {
   render(<App />);
-  // App.tsx uses HashRouter; default route is Lobby — check form submit button (KK locale)
-  expect(screen.getByRole("button", { name: "Бастау" })).toBeInTheDocument();
+  // Lobby's hero is the Quick Start button (KK locale)
+  expect(screen.getByText("Жылдам бастау")).toBeInTheDocument();
 });
 
 test("renders header app title", () => {

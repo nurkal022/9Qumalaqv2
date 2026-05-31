@@ -7,7 +7,7 @@ from app.engine.pool import EnginePool, EngineError
 from app.errors import AppError
 from app.play.schemas import NewGameReq, MoveReq, TakebackReq
 from app.play.service import (
-    create_game, apply_move, takeback, resign, undo_last_pair,
+    create_game, apply_move, takeback, resign, undo_last_pair, LEVEL_TO_MS,
 )
 from app.play.snapshot import build_snapshot, HINTS_LIMIT
 from app.db.models import Game, GameEvent
@@ -115,10 +115,56 @@ async def make_move(
     await apply_move(db, game=g, move_uci=req.moveUci, actor="human", fen_after=new_pos)
     await _refresh_rels(db, g)
 
-    # Engine's reply will be triggered via WebSocket (Task 12). Mark the snapshot
-    # as engineThinking so the client shows a thinking indicator until the WS pushes
-    # the engine_move event.
-    return {"game": build_snapshot(g, hints_used=HINTS_USED.get(g.id, 0), engine_thinking=True)}
+    # 4) If the engine is now to move and the game is still active, run the
+    #    engine reply synchronously and commit it. This keeps the move flow
+    #    self-contained in a single REST round-trip — simpler than splitting
+    #    across REST + WS, and avoids the "second move = not your turn" trap
+    #    where the engine never replies.
+    if g.status == "active" and g.side_to_move != g.side:
+        try:
+            level_ms = LEVEL_TO_MS.get(g.engine_level, LEVEL_TO_MS["normal"])
+            r = await engine.think(position_pos=g.current_fen, time_ms=level_ms)
+        except EngineError:
+            # Engine failed — game stays in active/engine-thinking state; user can retry
+            # by reloading. Surface a 503 so the toast informs them.
+            db.add(GameEvent(game_id=g.id, ply_at=g.current_ply, actor="system", type="engine_error"))
+            await db.commit()
+            raise AppError("engine_unavailable", 503)
+
+        # Handle terminal results (the engine reports game-over instead of a move)
+        if r.move == -1 or getattr(r, "terminal", None):
+            from datetime import datetime, timezone
+            terminal = getattr(r, "terminal", "unknown")
+            g.status = "finished"
+            g.result_reason = "rules_end"
+            g.finished_at = datetime.now(timezone.utc)
+            if terminal == "white_win":
+                g.result = "win_white"
+            elif terminal == "black_win":
+                g.result = "win_black"
+            else:
+                g.result = "draw"
+            await db.commit()
+            await _refresh_rels(db, g)
+            return {"game": build_snapshot(g, hints_used=HINTS_USED.get(g.id, 0))}
+
+        # Engine returned a normal move — apply it via Python rules and commit
+        try:
+            engine_pos = await engine.apply_move(position_pos=g.current_fen, move=r.move)
+        except (EngineError, NotImplementedError):
+            raise AppError("engine_unavailable", 503)
+        except (ValueError, IndexError):
+            # Engine produced a move our Python rules can't apply. This is a
+            # rule-divergence bug; surface as 503 so the user retries.
+            raise AppError("engine_unavailable", 503)
+
+        await apply_move(
+            db, game=g, move_uci=str(r.move), actor="engine", fen_after=engine_pos,
+            eval_cp=r.final_eval_cp, eval_depth=r.final_depth, think_time_ms=r.think_time_ms,
+        )
+        await _refresh_rels(db, g)
+
+    return {"game": build_snapshot(g, hints_used=HINTS_USED.get(g.id, 0))}
 
 
 @router.post("/{game_id}/undo")

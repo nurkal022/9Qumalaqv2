@@ -1,24 +1,201 @@
 @import "tailwindcss";
 
 @theme {
-  --color-bg-base: #0d1419;
-  --color-bg-raised: #141c22;
-  --color-bg-inset: #080d11;
-  --color-bg-border: #1f2a32;
-  --color-fg-primary: #ebe4d6;
-  --color-fg-secondary: #9ba3a8;
-  --color-fg-muted: #5d666c;
+  /* App chrome — deep neutral with a warm cast so the wooden board pops */
+  --color-bg-base: #15110d;
+  --color-bg-raised: #221a13;
+  --color-bg-inset: #100c08;
+  --color-bg-border: #3d2d20;
+
+  --color-fg-primary: #f3e9d4;
+  --color-fg-secondary: #b6a386;
+  --color-fg-muted: #6e5e48;
+  --color-fg-inverse: #15110d;
+
   --color-accent-teal: #2ba99c;
-  --color-accent-gold: #d4a548;
-  --color-state-win: #3fc9b7;
-  --color-state-loss: #c04848;
-  --color-state-draw: #9ba3a8;
-  --color-board-wood: #3a2a1c;
-  --color-board-hole: #1a1108;
-  --color-board-pebble: #d4c2a0;
-  --font-sans: "Manrope", "Inter", system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", monospace;
+  --color-accent-gold: #e6b34a;
+  --color-accent-amber: #f5a623;
+
+  --color-state-win: #6fc78b;
+  --color-state-loss: #c25450;
+  --color-state-draw: #b09d80;
+  --color-state-warn: #e6b34a;
+
+  /* Wood — warm honey oak, lighter and richer than walnut */
+  --color-wood-light: #d8a05a;
+  --color-wood-mid:   #b07838;
+  --color-wood-dark:  #7e4f1d;
+  --color-wood-edge:  #4a2c10;
+  --color-wood-frame: #6b3f18;
+
+  /* Pit interior — warm brown, NOT pitch black */
+  --color-pit-shadow: #5a3418;
+  --color-pit-floor:  #7a4e22;
+  --color-pit-rim:    #f0c887;
+
+  /* Pebbles — bright ivory against the dark pit floor */
+  --color-pebble-light: #fff5dc;
+  --color-pebble-mid:   #f0dca8;
+  --color-pebble-dark:  #c2a36a;
+  --color-pebble-shadow: #2a1808;
+
+  --color-tuz-glow: #d65a4f;
+
+  --font-sans: "Manrope", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Menlo", monospace;
 }
 
 html, body, #root { height: 100%; }
-body { background: var(--color-bg-base); color: var(--color-fg-primary); }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  background:
+    radial-gradient(ellipse at top, #2c2015 0%, transparent 60%),
+    var(--color-bg-base);
+  color: var(--color-fg-primary);
+  font-family: var(--font-sans);
+  font-feature-settings: "tnum" 1, "ss01" 1;
+  /* Mobile: kill the blue tap-highlight flash and rubber-band overscroll */
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+/* ─── Wooden board surface ───────────────────────────────────────────── */
+.board-wood {
+  background:
+    /* fine vertical grain */
+    repeating-linear-gradient(
+      91deg,
+      rgba(40, 22, 8, 0.10) 0px,
+      rgba(40, 22, 8, 0.10) 1px,
+      transparent 1px,
+      transparent 5px
+    ),
+    /* broader grain bands */
+    repeating-linear-gradient(
+      89deg,
+      rgba(255, 215, 160, 0.07) 0px,
+      rgba(255, 215, 160, 0.07) 14px,
+      transparent 14px,
+      transparent 38px
+    ),
+    /* diagonal warmth highlights */
+    radial-gradient(ellipse at 25% 20%, rgba(255, 200, 140, 0.18) 0%, transparent 55%),
+    radial-gradient(ellipse at 80% 80%, rgba(60, 30, 12, 0.35) 0%, transparent 65%),
+    /* base honey-walnut gradient */
+    linear-gradient(
+      135deg,
+      var(--color-wood-light) 0%,
+      var(--color-wood-mid) 55%,
+      var(--color-wood-dark) 100%
+    );
+  box-shadow:
+    inset 0 0 0 3px var(--color-wood-frame),
+    inset 0 0 0 5px var(--color-wood-edge),
+    inset 0 2px 30px rgba(255, 220, 170, 0.14),
+    inset 0 -4px 70px rgba(40, 22, 8, 0.5),
+    0 30px 80px -25px rgba(0, 0, 0, 0.8),
+    0 4px 14px rgba(0, 0, 0, 0.6);
+}
+
+/* ─── Carved pit chamber ─────────────────────────────────────────────── */
+.pit-chamber {
+  background:
+    radial-gradient(ellipse at 50% 30%, rgba(255, 200, 130, 0.10) 0%, transparent 60%),
+    linear-gradient(180deg, var(--color-pit-shadow) 0%, var(--color-pit-floor) 100%);
+  box-shadow:
+    inset 0 4px 8px rgba(40, 22, 8, 0.55),
+    inset 0 -1px 3px rgba(255, 200, 135, 0.18),
+    inset 2px 0 4px rgba(40, 22, 8, 0.4),
+    inset -2px 0 4px rgba(40, 22, 8, 0.4),
+    0 1px 0 rgba(255, 220, 170, 0.3);
+}
+
+.pit-chamber.is-interactive {
+  cursor: pointer;
+  transition: box-shadow 200ms ease, transform 100ms ease;
+  /* Mobile: prevent double-tap zoom and text selection on the board */
+  touch-action: manipulation;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* Apply the lift/glow only for real pointers — on touchscreens :hover sticks
+   after a tap and would leave the pit glowing until you tap elsewhere. */
+@media (hover: hover) and (pointer: fine) {
+  .pit-chamber.is-interactive:hover {
+    transform: translateY(-1px);
+    box-shadow:
+      inset 0 5px 10px rgba(0, 0, 0, 0.7),
+      inset 0 -2px 4px rgba(255, 200, 135, 0.15),
+      inset 3px 0 6px rgba(0, 0, 0, 0.5),
+      inset -3px 0 6px rgba(0, 0, 0, 0.5),
+      inset 0 0 0 2px var(--color-accent-amber),
+      0 1px 0 rgba(255, 220, 170, 0.3),
+      0 0 28px rgba(245, 166, 35, 0.45);
+  }
+}
+.pit-chamber.is-interactive:active {
+  transform: translateY(0px);
+}
+
+.pit-chamber.is-tuz {
+  box-shadow:
+    inset 0 5px 10px rgba(0, 0, 0, 0.75),
+    inset 0 -2px 4px rgba(255, 110, 90, 0.22),
+    inset 0 0 0 2px var(--color-tuz-glow),
+    0 0 18px rgba(214, 90, 79, 0.45);
+}
+
+/* ─── Long kazan groove ──────────────────────────────────────────────── */
+.kazan-groove {
+  /* Match pit pebble size scaled to viewport. Pit pebbles are roughly
+     pit_width/2 wide, and pit_width is ~1/9 of the board surface. */
+  --kazan-pebble: 13px;
+  background:
+    radial-gradient(ellipse at 50% 25%, rgba(0, 0, 0, 0.55) 0%, transparent 75%),
+    linear-gradient(180deg, var(--color-pit-shadow) 0%, var(--color-pit-floor) 100%);
+  box-shadow:
+    inset 0 7px 16px rgba(0, 0, 0, 0.7),
+    inset 0 -2px 4px rgba(255, 200, 135, 0.12),
+    inset 4px 0 9px rgba(0, 0, 0, 0.5),
+    inset -4px 0 9px rgba(0, 0, 0, 0.5),
+    0 1px 0 rgba(255, 220, 170, 0.3);
+}
+@media (min-width: 640px) {
+  .kazan-groove { --kazan-pebble: 16px; }
+}
+
+/* ─── Pit numeral (cleaned up — no engraved drama) ───────────────────── */
+.pit-numeral {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: rgba(40, 22, 8, 0.55);
+  text-shadow: 0 1px 0 rgba(255, 220, 170, 0.35);
+  letter-spacing: 0.02em;
+}
+
+/* ─── Single pebble ──────────────────────────────────────────────────── */
+.pebble {
+  background:
+    radial-gradient(circle at 32% 28%,
+      var(--color-pebble-light) 0%,
+      var(--color-pebble-mid) 50%,
+      var(--color-pebble-dark) 100%);
+  box-shadow:
+    inset 0 1px 1px rgba(255, 255, 255, 0.7),
+    inset 0 -2px 3px rgba(120, 80, 40, 0.4),
+    0 1px 2px rgba(0, 0, 0, 0.55),
+    0 0 0 0.5px rgba(80, 50, 20, 0.35);
+}
+
+/* ─── Sidebar nameplate ──────────────────────────────────────────────── */
+.nameplate {
+  background:
+    linear-gradient(180deg, var(--color-wood-frame) 0%, var(--color-wood-edge) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 220, 170, 0.3),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.5),
+    0 2px 10px rgba(0, 0, 0, 0.5);
+  color: var(--color-pebble-light);
+  font-family: var(--font-sans);
+}

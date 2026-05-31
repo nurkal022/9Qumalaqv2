@@ -51,7 +51,7 @@ export type GameState = {
 
 export type NewGameReq = {
   side: 0 | 1;
-  engineLevel: "easy" | "normal" | "hard";
+  engineLevel: "test" | "easy" | "normal" | "hard";
   clock: { initialMs: number; incrementMs: number } | null;
   useBook: boolean;
 };

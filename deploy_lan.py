@@ -11,13 +11,15 @@ import paramiko
 
 HOST = '10.0.34.22'
 USER = 'llama'
-PASS = os.environ["DEPLOY_PASSWORD"]
+PASS = os.environ.get("DEPLOY_PASSWORD")
 REMOTE_DIR = '/home/llama/togyz_server'
 
 LOCAL = os.path.dirname(os.path.abspath(__file__))
 
 
 def main():
+    if PASS is None:
+        raise RuntimeError("Set DEPLOY_PASSWORD env var")
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     print(f"Connecting to {HOST}...")

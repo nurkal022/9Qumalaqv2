@@ -14,7 +14,20 @@ from flask import Flask, jsonify, request, send_from_directory
 app = Flask(__name__)
 
 ENGINE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'engine')
-ENGINE_PATH = os.path.join(ENGINE_DIR, 'target', 'release', 'togyzkumalaq-engine')
+ENGINE_PATH = os.environ.get(
+    'TOGYZ_ENGINE',
+    os.path.join(ENGINE_DIR, 'target', 'release', 'togyzkumalaq-engine'),
+)
+
+def _engine_build_id():
+    """Identify the binary by its mtime + size so logged games carry a version stamp."""
+    try:
+        st = os.stat(ENGINE_PATH)
+        return f"{int(st.st_mtime)}-{st.st_size}"
+    except Exception:
+        return "unknown"
+
+ENGINE_BUILD = _engine_build_id()
 
 # Game logging
 GAMES_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'games_log')
@@ -24,7 +37,7 @@ os.makedirs(GAMES_LOG_DIR, exist_ok=True)
 game_sessions = {}  # session_id -> {moves: [], positions: [], start_time, ...}
 game_sessions_lock = threading.Lock()
 
-# Persistent engine process
+# Single engine for maximum strength (fastest response per user)
 engine_proc = None
 engine_lock = threading.Lock()
 
@@ -34,10 +47,21 @@ opening_book = None
 
 
 def start_engine():
-    """Start the persistent engine subprocess."""
+    """Start persistent engine subprocess.
+
+    The engine uses lazy-SMP and grabs every available core (24 here), which
+    starves the desktop while it thinks. We restrict it via taskset + nice so
+    the rest of the system stays responsive. Override count with TOGYZ_CORES
+    (e.g. TOGYZ_CORES=12 for half the box).
+    """
     global engine_proc
+    cores = int(os.environ.get('TOGYZ_CORES', '8'))
+    nice_level = int(os.environ.get('TOGYZ_NICE', '10'))
+    cpu_list = f"0-{cores - 1}"
+    cmd = ['taskset', '-c', cpu_list, 'nice', '-n', str(nice_level), ENGINE_PATH, 'serve']
+    print(f"Engine launch: {' '.join(cmd)}")
     engine_proc = subprocess.Popen(
-        [ENGINE_PATH, 'serve'],
+        cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -52,28 +76,43 @@ def start_engine():
 
 
 def stop_engine():
-    """Stop the engine process cleanly."""
     global engine_proc
     if engine_proc and engine_proc.poll() is None:
         try:
             engine_proc.stdin.write('quit\n')
             engine_proc.stdin.flush()
-            engine_proc.wait(timeout=5)
+            engine_proc.wait(timeout=3)
         except Exception:
             engine_proc.kill()
-        print("Engine stopped")
 
 
-def send_command(cmd):
-    """Send a command to the engine and read one line of response."""
+def send_command_pooled(cmd, timeout=300):
+    """Send command to single engine. Auto-restart on crash."""
     global engine_proc
-    if engine_proc is None or engine_proc.poll() is not None:
-        print("Engine not running, restarting...")
-        start_engine()
-    engine_proc.stdin.write(cmd + '\n')
-    engine_proc.stdin.flush()
-    line = engine_proc.stdout.readline().strip()
-    return line
+    with engine_lock:
+        # Check alive, restart if needed
+        if engine_proc is None or engine_proc.poll() is not None:
+            print("Engine not running, starting...")
+            start_engine()
+        try:
+            engine_proc.stdin.write(cmd + '\n')
+            engine_proc.stdin.flush()
+            line = engine_proc.stdout.readline().strip()
+            if not line:
+                raise RuntimeError("Empty response")
+            return line
+        except (BrokenPipeError, RuntimeError, IOError) as e:
+            print(f"Engine error: {e}. Restarting...")
+            try: engine_proc.kill()
+            except: pass
+            start_engine()
+            try:
+                engine_proc.stdin.write(cmd + '\n')
+                engine_proc.stdin.flush()
+                line = engine_proc.stdout.readline().strip()
+                return line or "error engine_crashed"
+            except Exception as e2:
+                return f"error {e2}"
 
 
 def board_to_pos(state):
@@ -168,14 +207,20 @@ def log_game(session_id, result=None):
         session = game_sessions.pop(session_id, None)
     if not session or not session.get('moves'):
         return
+    # Infer human_color from first move (if first 'who' is 'human', they played white)
+    human_color = session.get('human_color')
+    if human_color is None and session['moves']:
+        human_color = 'white' if session['moves'][0]['who'] == 'human' else 'black'
+
     game_data = {
         'session_id': session_id,
         'start_time': session['start_time'],
         'end_time': datetime.utcnow().isoformat(),
         'result': result,
+        'engine_build': ENGINE_BUILD,
         'moves': session['moves'],
         'positions': session['positions'],
-        'human_color': session.get('human_color'),
+        'human_color': human_color,
         'num_moves': len(session['moves']),
     }
     # Append to daily log file
@@ -215,7 +260,7 @@ def get_engine_move():
     data = request.json
     pos = board_to_pos(data['board'])
     time_ms = data.get('time_ms', 3000)
-    use_book = data.get('use_book', True)
+    use_book = bool(data.get('use_book', True))
     session_id = get_session_id()
 
     # Try opening book first
@@ -234,46 +279,48 @@ def get_engine_move():
                 'book': book_info,
             })
 
-    # Engine search with persistent process
-    with engine_lock:
-        try:
-            response = send_command(f'go time {time_ms} pos {pos}')
+    # Engine search via pool (supports concurrent users)
+    try:
+        cmd = f'go time {time_ms} pos {pos}'
+        if not use_book:
+            cmd += ' nobook'
+        response = send_command_pooled(cmd)
 
-            if response.startswith('terminal'):
-                parts = response.split()
-                result_str = parts[1] if len(parts) > 1 else 'unknown'
-                log_game(session_id, result=result_str)
-                return jsonify({'terminal': True, 'result': result_str})
+        if response.startswith('terminal'):
+            parts = response.split()
+            result_str = parts[1] if len(parts) > 1 else 'unknown'
+            log_game(session_id, result=result_str)
+            return jsonify({'terminal': True, 'result': result_str})
 
-            if response.startswith('bestmove'):
-                parts = response.split()
-                result = {}
-                i = 0
-                while i < len(parts) - 1:
-                    key = parts[i]
-                    val = parts[i + 1]
-                    if key == 'bestmove':
-                        result['bestmove'] = int(val)
-                    elif key == 'score':
-                        result['score'] = int(val)
-                    elif key == 'depth':
-                        result['depth'] = int(val)
-                    elif key == 'nodes':
-                        result['nodes'] = int(val)
-                    elif key == 'time':
-                        result['time_ms'] = int(val)
-                    elif key == 'nps':
-                        result['nps'] = int(val)
-                    i += 1
-                record_move(session_id, pos, result, 'engine')
-                return jsonify(result)
+        if response.startswith('bestmove'):
+            parts = response.split()
+            result = {}
+            i = 0
+            while i < len(parts) - 1:
+                key = parts[i]
+                val = parts[i + 1]
+                if key == 'bestmove':
+                    result['bestmove'] = int(val)
+                elif key == 'score':
+                    result['score'] = int(val)
+                elif key == 'depth':
+                    result['depth'] = int(val)
+                elif key == 'nodes':
+                    result['nodes'] = int(val)
+                elif key == 'time':
+                    result['time_ms'] = int(val)
+                elif key == 'nps':
+                    result['nps'] = int(val)
+                i += 1
+            record_move(session_id, pos, result, 'engine')
+            return jsonify(result)
 
-            if response.startswith('error'):
-                return jsonify({'error': response}), 500
+        if response.startswith('error'):
+            return jsonify({'error': response}), 500
 
-            return jsonify({'error': f'Unexpected: {response}'}), 500
-        except Exception as e:
-            return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Unexpected: {response}'}), 500
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/newgame', methods=['POST'])
@@ -282,12 +329,11 @@ def new_game():
     session_id = get_session_id()
     # Save previous game if any
     log_game(session_id, result='abandoned')
-    with engine_lock:
-        try:
-            response = send_command('newgame')
-            return jsonify({'status': 'ok'})
-        except Exception as e:
-            return jsonify({'error': str(e)}), 500
+    try:
+        send_command_pooled('newgame', timeout=10)
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 
 @app.route('/api/position', methods=['POST'])
@@ -298,12 +344,9 @@ def push_position():
     session_id = get_session_id()
     move_pit = data.get('move_pit')
     record_move(session_id, pos, {'source': 'human', 'bestmove': move_pit}, 'human')
-    with engine_lock:
-        try:
-            response = send_command(f'position {pos}')
-            return jsonify({'status': 'ok'})
-        except Exception as e:
-            return jsonify({'error': str(e)}), 500
+    # Note: position sync disabled for pool - each engine has its own state
+    # Engines don't need position sync since they get full pos in each 'go' command
+    return jsonify({'status': 'ok'})
 
 
 @app.route('/api/games', methods=['GET'])
@@ -325,7 +368,8 @@ atexit.register(stop_engine)
 
 if __name__ == '__main__':
     print(f"Engine: {ENGINE_PATH}")
+    print(f"Single-engine mode (max strength, 1 user at a time)")
     load_opening_book()
     start_engine()
     print(f"Starting server at http://localhost:8080")
-    app.run(host='0.0.0.0', port=8080, debug=False)
+    app.run(host='0.0.0.0', port=8080, debug=False, threaded=True)

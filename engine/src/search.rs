@@ -63,6 +63,8 @@ pub struct Searcher {
     pub nodes: u64,
     pub max_time_ms: u64,
     pub silent: bool,
+    /// When true, skip opening-book probe — engine searches every position fresh.
+    pub skip_book: bool,
     start_time: Instant,
     stopped: bool,
     /// Shared stop flag for SMP — when set, all threads should stop
@@ -94,6 +96,7 @@ impl Searcher {
             nodes: 0,
             max_time_ms: 5000,
             silent: false,
+            skip_book: false,
             start_time: Instant::now(),
             stopped: false,
             abort: Arc::new(AtomicBool::new(false)),
@@ -119,6 +122,7 @@ impl Searcher {
             nodes: 0,
             max_time_ms: u64::MAX, // workers rely on abort flag, not time
             silent: true,
+            skip_book: false,
             start_time: Instant::now(),
             stopped: false,
             abort,
@@ -178,33 +182,69 @@ impl Searcher {
             if total <= 60 {
                 let my_active = board.pits[me].iter().filter(|&&x| x > 0).count() as i32;
                 let opp_active = board.pits[opp].iter().filter(|&&x| x > 0).count() as i32;
+                let my_p = my_stones as i32;
+                let opp_p = opp_stones as i32;
 
-                // Scale corrections smoothly: total=60→1, total=30→2, total=15→3, total=5→4
-                let scale = ((65 - total as i32).max(1)) / 15;
-                let scale = scale.clamp(1, 4);
+                // Phase-based mobility multiplier (data-tuned from 360K PlayOK games):
+                //   ≤60 stones: ×3 — entering tempo (median ply 47, 92% of pro games)
+                //   ≤40 stones: ×6 — main tempo phase (61% of pro games)
+                //   ≤25 stones: ×10 — critical zugzwang risk
+                let mob_mult = if total <= 25 { 10 }
+                               else if total <= 40 { 6 }
+                               else { 3 };
+                let mobility_bonus = (my_active - opp_active) * 8 * mob_mult;
 
-                // Mobility: critical endgame factor (PlayOK: mobility weight = 124 in HCE)
-                let mobility_bonus = (my_active - opp_active) * 3 * scale;
+                // Pit-asymmetry bonus: stones on MY pits become mine via end-of-game sweep.
+                // 21% of pro games end with kazan spread ≤5 — decided by who emptied first.
+                let asym_weight = if total <= 25 { 12 }
+                                  else if total <= 40 { 8 }
+                                  else { 4 };
+                let asymmetry_bonus = (my_p - opp_p) * asym_weight;
 
-                // Starvation: quadratic pressure when opponent running low
-                let starvation = if opp_stones <= 20 {
-                    let pressure = 21 - opp_stones as i32;
-                    (pressure * pressure * scale) / 8
+                // Move-deficit penalty: about to lose tempo race
+                let mob_deficit = if my_active <= 3 && opp_active > my_active {
+                    let d = opp_active - my_active;
+                    -d * d * 80
+                } else if opp_active <= 3 && my_active > opp_active {
+                    let a = my_active - opp_active;
+                    a * a * 80
                 } else { 0 };
 
-                // Finishing: huge bonus to close out won games
+                // Zugzwang: about to run out of moves entirely
+                let zugzwang = if my_active <= 1 && total > 5 {
+                    -600
+                } else if opp_active <= 1 && total > 5 {
+                    600
+                } else { 0 };
+
+                // Starvation pressure — two-stage:
+                //   linear pre-warning at ≤18 stones on a side
+                //   quadratic explosion at ≤9 (close to terminal)
+                let starv_opp = if opp_p <= 18 {
+                    let linear = (18 - opp_p) * 6;
+                    let quad = if opp_p <= 9 { let p = 10 - opp_p; p * p * 15 } else { 0 };
+                    linear + quad
+                } else { 0 };
+                let starv_me = if my_p <= 18 {
+                    let linear = (18 - my_p) * 6;
+                    let quad = if my_p <= 9 { let p = 10 - my_p; p * p * 15 } else { 0 };
+                    linear + quad
+                } else { 0 };
+
+                // Finishing: when winning material and opponent emptying — close it out
                 let my_kazan = board.kazan[me] as i32;
                 let opp_kazan = board.kazan[opp] as i32;
-                let finish_bonus = if my_kazan > opp_kazan + 5 && opp_stones <= 8 {
-                    (9 - opp_stones as i32) * 8 * scale
+                let finish_bonus = if my_kazan > opp_kazan + 5 && opp_p <= 8 {
+                    (9 - opp_p) * 100
                 } else { 0 };
 
-                // Kazan proximity: accelerate when close to 82
+                // Kazan proximity to win threshold (82)
                 let kazan_bonus = if my_kazan >= 65 {
-                    (my_kazan - 65) * 2 * scale
+                    (my_kazan - 65) * 6
                 } else { 0 };
 
-                base + mobility_bonus + starvation + finish_bonus + kazan_bonus
+                base + mobility_bonus + asymmetry_bonus + mob_deficit + zugzwang
+                     + starv_opp - starv_me + finish_bonus + kazan_bonus
             } else {
                 base
             }
@@ -262,6 +302,30 @@ impl Searcher {
         }
     }
 
+    /// Score every legal root move at the given depth. Used for multi-PV / creative mode
+    /// to pick from top-K candidates instead of always playing the strict best move.
+    /// Most child positions will already be in TT after a recent search, so this is fast.
+    pub fn score_root_moves(&mut self, board: &Board, depth: i32) -> Vec<(usize, i32)> {
+        let mut results = Vec::new();
+        let saved_start = self.start_time;
+        let saved_max = self.max_time_ms;
+        // Give multi-PV pass a generous budget — we don't want it to timeout mid-scan
+        self.start_time = std::time::Instant::now();
+        self.max_time_ms = 5_000;
+        for pit in 0..NUM_PITS {
+            if !board.is_valid_move(pit) { continue; }
+            let mut child = *board;
+            child.make_move(pit);
+            // Score is from opponent's perspective after our move; negate to get our score.
+            let score = -self.alpha_beta(&child, depth - 1, -EVAL_INF, EVAL_INF, 1);
+            results.push((pit, score));
+        }
+        self.start_time = saved_start;
+        self.max_time_ms = saved_max;
+        results.sort_by_key(|&(_, s)| -s);
+        results
+    }
+
     /// Lazy SMP search: spawn helper threads that share the TT
     pub fn search_smp(&mut self, board: &Board, max_depth: i32, time_ms: u64, num_threads: usize) -> SearchResult {
         if num_threads <= 1 {
@@ -285,7 +349,7 @@ impl Searcher {
                 let mut worker = Searcher::new_worker(tt, abort, nnue, egtb);
                 worker.game_history = game_hist;
                 worker.start_time = Instant::now();
-                worker.max_time_ms = time_ms + 1000; // workers get extra time, rely on abort
+                worker.max_time_ms = time_ms; // strict time limit
 
                 // Depth offset: helpers search at different starting depths for diversity
                 // Thread 1: depths 1,2,3,...  Thread 2: depths 2,3,4,...  etc.
@@ -331,19 +395,14 @@ impl Searcher {
         self.stopped = false;
         self.killer_moves = [[-1; 2]; MAX_DEPTH as usize];
 
-        // === ENDGAME TIME MANAGEMENT ===
-        // Allocate more time in endgame where precision matters most
+        // === TIME MANAGEMENT ===
+        // Respect user's chosen time budget. No more multiplying for endgame.
         let total_board_stones: u16 = board.pits[0].iter().map(|&x| x as u16).sum::<u16>()
             + board.pits[1].iter().map(|&x| x as u16).sum::<u16>();
-        self.max_time_ms = if total_board_stones <= 30 {
-            time_ms * 2       // Deep endgame: 2x time
-        } else if total_board_stones <= 60 {
-            time_ms * 3 / 2   // Endgame: 1.5x time
-        } else {
-            time_ms
-        };
+        self.max_time_ms = time_ms;
 
-        // Opening book probe — instant move if in book
+        // Opening book probe — instant move if in book (unless caller asked to skip)
+        if !self.skip_book {
         if let Some(ref book) = self.opening_book {
             if let Some(book_move) = book.lookup(board) {
                 if !self.silent {
@@ -358,6 +417,7 @@ impl Searcher {
                     time_ms: 0,
                 };
             }
+        }
         }
 
         // Age history values: halve to prevent stale values from dominating

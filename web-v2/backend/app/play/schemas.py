@@ -53,7 +53,7 @@ class GameStateOut(BaseModel):
 
 class NewGameReq(BaseModel):
     side: int = Field(ge=0, le=1)
-    engineLevel: Literal["easy", "normal", "hard"] = "normal"
+    engineLevel: Literal["test", "easy", "normal", "hard"] = "normal"
     clock: dict | None = None  # {"initialMs": int, "incrementMs": int}
     useBook: bool = False
     startFen: str | None = None

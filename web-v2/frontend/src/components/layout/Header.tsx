@@ -1,11 +1,14 @@
 import { Link } from "react-router";
 import { useTranslation } from "react-i18next";
+import { Settings } from "lucide-react";
 import { useUI } from "../../stores/ui";
 import { useAuth } from "../../stores/auth";
 
 export default function Header() {
   const { t, i18n } = useTranslation();
-  const { locale, setLocale } = useUI();
+  const locale = useUI((s) => s.locale);
+  const setLocale = useUI((s) => s.setLocale);
+  const openSettings = useUI((s) => s.openSettings);
   const me = useAuth((s) => s.me);
 
   const toggleLocale = () => {
@@ -22,7 +25,21 @@ export default function Header() {
         <Link to="/history">{t("history.title")}</Link>
       </nav>
       <div className="ml-auto flex items-center gap-3 text-sm">
-        <button onClick={toggleLocale}>{locale.toUpperCase()}</button>
+        <button
+          type="button"
+          onClick={toggleLocale}
+          className="font-mono px-1.5 py-0.5 rounded hover:bg-bg-inset transition"
+        >
+          {locale.toUpperCase()}
+        </button>
+        <button
+          type="button"
+          onClick={openSettings}
+          aria-label={t("settings.title")}
+          className="p-1.5 rounded hover:bg-bg-inset transition text-fg-secondary"
+        >
+          <Settings size={18} />
+        </button>
         {me?.kind === "user" ? (
           <Link to="/profile">{me.user.username}</Link>
         ) : (

@@ -19,6 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../alphazero-code
 def download_games(host, password, output_dir='master_games'):
     """Download game logs from server."""
     import paramiko
+    if password is None:
+        raise RuntimeError("Set SSH_PASSWORD env var")
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect(host, username='root', password=password, timeout=10)
@@ -203,8 +205,8 @@ def process_games(games_dir, output_path, min_moves=10):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--host', default='85.239.36.121')
-    parser.add_argument('--password', default='REDACTED')
+    parser.add_argument('--host', default=os.environ.get("SSH_HOST", "10.0.34.22"))
+    parser.add_argument('--password', default=os.environ.get("SSH_PASSWORD"))
     parser.add_argument('--output', default='master_games.bin')
     parser.add_argument('--games-dir', default='master_games')
     parser.add_argument('--skip-download', action='store_true')

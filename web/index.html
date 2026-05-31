@@ -243,6 +243,9 @@ body {
     box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 14px var(--accent-gold);
     border-color: var(--accent-gold);
 }
+/* Last-move highlights — color-coded by WHO moved.
+   Player moves: cool blue (calm).  Engine moves: warm red/orange (visible, alarming).
+   Source: the pit they played FROM.  Land: the pit the last stone landed in. */
 .pit.move-source {
     box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 10px rgba(255,152,0,0.8);
     border-color: #FF9800;
@@ -250,6 +253,65 @@ body {
 .pit.move-land {
     box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 10px rgba(76,175,80,0.8);
     border-color: #4CAF50;
+}
+/* Player (you) — blue tint */
+.pit.move-src-player {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 3px #2196F3, 0 0 18px rgba(33,150,243,0.7);
+    border-color: #2196F3;
+    animation: move-pulse-blue 1.2s ease-out;
+}
+.pit.move-land-player {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 3px #4FC3F7, 0 0 14px rgba(79,195,247,0.7);
+    border-color: #4FC3F7;
+    animation: move-pulse-blue 1.2s ease-out;
+}
+/* Engine (opponent) — warm red */
+.pit.move-src-engine {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 3px #E53935, 0 0 18px rgba(229,57,53,0.7);
+    border-color: #E53935;
+    animation: move-pulse-red 1.2s ease-out;
+}
+.pit.move-land-engine {
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 3px #FF7043, 0 0 14px rgba(255,112,67,0.7);
+    border-color: #FF7043;
+    animation: move-pulse-red 1.2s ease-out;
+}
+@keyframes move-pulse-blue {
+    0%   { box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 6px rgba(33,150,243,1), 0 0 28px rgba(33,150,243,0.9); }
+    100% { box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 3px #2196F3, 0 0 18px rgba(33,150,243,0.7); }
+}
+@keyframes move-pulse-red {
+    0%   { box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 6px rgba(229,57,53,1), 0 0 28px rgba(229,57,53,0.9); }
+    100% { box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 0 3px #E53935, 0 0 18px rgba(229,57,53,0.7); }
+}
+
+/* Last-move banner — shows "Соперник: 7→2 (взято 4)" */
+.last-move-banner {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 6px 12px;
+    margin: 6px 0;
+    background: rgba(0,0,0,0.35);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    font-size: 13px;
+    color: var(--text-light);
+}
+.last-move-banner.visible { display: flex; }
+.last-move-banner .who {
+    padding: 2px 8px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: bold;
+}
+.last-move-banner .who.player { background: rgba(33,150,243,0.25); color: #4FC3F7; border: 1px solid #2196F3; }
+.last-move-banner .who.engine { background: rgba(229,57,53,0.25); color: #FF7043; border: 1px solid #E53935; }
+.last-move-banner .move-arrow { font-size: 16px; opacity: 0.7; }
+.last-move-banner .capture-info {
+    color: var(--accent-gold);
+    font-weight: bold;
 }
 .pit.sowing-active {
     box-shadow: inset 0 3px 8px rgba(0,0,0,0.4), 0 0 14px rgba(33,150,243,0.9);
@@ -342,6 +404,7 @@ body {
 .btn-gold { background: linear-gradient(135deg, var(--accent-gold), #FFC107); color: var(--text-dark); }
 .btn-dark { background: linear-gradient(135deg, #8D6E63, #5D4037); color: var(--text-light); }
 .btn-orange { background: linear-gradient(135deg, #FF9800, #F57C00); color: #fff; }
+.btn-blue { background: linear-gradient(135deg, #42A5F5, #1976D2); color: #fff; }
 .btn-sm { padding: 5px 12px; font-size: 12px; }
 
 .status-line {
@@ -467,6 +530,122 @@ body {
     padding-top: 6px;
     border-top: 1px solid rgba(93,64,55,0.5);
 }
+
+/* === TOURNAMENT PANEL === */
+.tournament-panel {
+    display: none;
+    position: fixed;
+    top: 16px; right: 16px;
+    width: 340px;
+    background: linear-gradient(145deg, rgba(62,39,35,0.98), rgba(45,28,22,0.98));
+    border: 2px solid var(--accent-gold);
+    border-radius: 12px;
+    padding: 14px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.7);
+    z-index: 100;
+    font-size: 12.5px;
+}
+.tournament-panel.visible { display: block; }
+.tour-header {
+    font-size: 16px;
+    font-weight: bold;
+    color: var(--accent-gold);
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255,213,79,0.3);
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.tour-header .live-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent-green);
+    animation: pulse 1.2s infinite;
+    margin-right: 5px;
+}
+.tour-header.thinking .live-dot { background: var(--accent-gold); }
+.tour-section {
+    margin-bottom: 12px;
+    padding-bottom: 10px;
+    border-bottom: 1px dashed rgba(141,110,99,0.3);
+}
+.tour-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+.tour-section-title {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #8D6E63;
+    margin-bottom: 6px;
+}
+.tour-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 10px;
+}
+.tour-grid .lbl { color: #A1887F; font-size: 12px; }
+.tour-grid .val {
+    color: var(--text-light);
+    font-weight: bold;
+    font-family: 'Consolas',monospace;
+    text-align: right;
+    font-size: 12.5px;
+}
+.tour-grid .val.positive { color: var(--accent-green); }
+.tour-grid .val.negative { color: #EF5350; }
+.tour-grid .val.highlight { color: var(--accent-gold); font-size: 14px; }
+.tour-timer {
+    font-size: 28px;
+    font-family: 'Consolas',monospace;
+    font-weight: bold;
+    color: var(--accent-gold);
+    text-align: center;
+    padding: 8px 0;
+    letter-spacing: 2px;
+}
+.tour-timer.warning { color: #FFA726; }
+.tour-progress {
+    width: 100%;
+    height: 4px;
+    background: rgba(93,64,55,0.5);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+.tour-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-green), var(--accent-gold));
+    transition: width 0.3s;
+}
+.tour-moves-count {
+    background: rgba(0,0,0,0.3);
+    border-radius: 6px;
+    padding: 6px 10px;
+    display: flex;
+    justify-content: space-around;
+    text-align: center;
+}
+.tour-move-badge {
+    font-size: 10px;
+    color: #A1887F;
+    text-transform: uppercase;
+}
+.tour-move-count {
+    font-size: 18px;
+    font-weight: bold;
+    color: var(--accent-gold);
+    font-family: 'Consolas',monospace;
+}
+.tour-panel-close {
+    background: none;
+    border: none;
+    color: #8D6E63;
+    cursor: pointer;
+    font-size: 18px;
+    padding: 0 4px;
+}
+.tour-panel-close:hover { color: var(--text-light); }
 .detail-section.collapsed { display: none; }
 
 /* Modal */
@@ -513,6 +692,35 @@ body {
     font-size: 24px;
     color: var(--accent-gold);
     flex: 1;
+}
+.history-filter {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-light);
+    align-items: flex-start;
+}
+.history-filter label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+}
+.history-filter input[type="checkbox"] {
+    accent-color: var(--accent-gold);
+}
+.build-badge {
+    display: inline-block;
+    background: rgba(102,187,106,0.2);
+    color: var(--accent-green);
+    border: 1px solid var(--accent-green);
+    padding: 0 6px;
+    border-radius: 8px;
+    font-size: 9px;
+    font-weight: bold;
+    margin-left: 4px;
 }
 .history-list {
     width: 600px;
@@ -586,6 +794,274 @@ body {
     min-width: 80px;
     text-align: center;
 }
+
+/* Test mode controls */
+.test-controls {
+    display: flex;
+    gap: 6px;
+    margin-top: 10px;
+    align-items: center;
+    justify-content: center;
+    background: rgba(33,150,243,0.1);
+    border: 1px solid #2196F3;
+    padding: 6px;
+    border-radius: 8px;
+}
+.test-badge {
+    background: #1976D2;
+    color: #fff;
+    font-weight: bold;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 6px;
+}
+.test-info {
+    font-size: 12px;
+    color: #4FC3F7;
+    min-width: 70px;
+    text-align: center;
+}
+
+/* ============================================================ */
+/* === MOBILE LAYOUT (≤720px): board rotates to vertical    === */
+/* ============================================================ */
+@media (max-width: 720px) {
+    body { padding: 4px; font-size: 13px; }
+
+    .header { padding: 6px 8px; margin-bottom: 6px; }
+    .header h1 { font-size: 15px; }
+
+    /* Stack everything vertically: board on top, side-panel below */
+    .main-layout {
+        flex-direction: column;
+        gap: 8px;
+        padding: 0 4px;
+        max-width: 100%;
+    }
+
+    .board-area { width: 100%; align-items: stretch; }
+
+    /* Compact player bars at top/bottom */
+    .player-bar {
+        width: 100%;
+        padding: 6px 10px;
+        margin-bottom: 4px;
+        font-size: 12px;
+    }
+    .player-bar.bottom { margin-top: 4px; margin-bottom: 0; }
+    .player-bar .name { font-size: 12px; }
+    .player-bar .score-box {
+        font-size: 16px;
+        padding: 2px 10px;
+        min-width: 36px;
+    }
+    .player-bar .turn-badge { font-size: 10px; padding: 1px 6px; }
+
+    /* === BOARD: rotate to row-direction (two vertical pit columns) === */
+    .board {
+        padding: 6px;
+        display: flex;
+        flex-direction: row;
+        gap: 4px;
+        align-items: stretch;
+    }
+
+    /* Hide the desktop labels-rows; pit numbers go inside each pit */
+    .labels-row { display: none; }
+
+    /* Pit columns: vertical stacks, share width 50/50 around the kazan strip */
+    .pits-row {
+        flex-direction: column;
+        flex: 1;
+        gap: 3px;
+    }
+    /* Order: white-pits | kazans | black-pits  (you on left, opponent on right) */
+    #white-row { order: 1; }
+    .kazans-col { order: 2; }
+    #black-row { order: 3; }
+
+    /* Each pit is now a horizontal bar (wide, short) */
+    .pit {
+        width: 100%;
+        height: auto;
+        min-height: 56px;
+        flex: 1;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        padding: 3px 6px;
+        border-radius: 8px;
+        overflow: visible;
+    }
+    .pit::before {
+        content: attr(data-pit-label);
+        position: absolute;
+        bottom: 1px;
+        font-size: 8px;
+        font-weight: bold;
+        color: rgba(255,255,255,0.45);
+        pointer-events: none;
+        line-height: 1;
+    }
+    #white-row .pit::before { right: 4px; }
+    #black-row .pit::before { left: 4px; }
+
+    /* Stones inside pit: same LAYERED logic as desktop, but transposed for horizontal pit.
+       Desktop:  2 cols × 5 rows = 10 stones/layer (vertical pit)
+       Mobile:   5 cols × 2 rows = 10 stones/layer (horizontal pit)
+       Layers stack with the JS-set inline `bottom` offset. */
+    .stones-col {
+        flex: 1;
+        height: 100%;
+        min-height: 56px;
+        position: relative;
+        overflow: hidden;
+    }
+    .stone-layer {
+        /* Don't override `bottom` or `left` — JS uses them to stack layers visually */
+        display: grid !important;
+        grid-template-columns: repeat(5, 1fr) !important;
+        grid-auto-rows: min-content !important;
+        flex-wrap: nowrap !important;
+        gap: 2px !important;
+        padding: 2px 4px !important;
+        justify-items: center;
+        align-items: center;
+    }
+    /* Stones large enough to cover the pit surface (5 across) */
+    .pit .stone {
+        width: 18px !important;
+        height: 18px !important;
+    }
+
+    .stone-count {
+        order: 2;
+        margin: 0;
+        margin-left: 4px;
+        font-size: 16px;
+        font-weight: bold;
+        min-width: 20px;
+        text-align: center;
+    }
+    #black-row .stone-count {
+        order: 0;
+        margin-left: 0;
+        margin-right: 4px;
+    }
+    #black-row .pit { flex-direction: row-reverse; }
+
+    .tuzdyk-marker {
+        font-size: 8px;
+        top: 1px;
+    }
+    .pit.tuzdyk {
+        background: linear-gradient(90deg, #6B2020 0%, var(--tuzdyk-bg) 50%, #6B2020 100%);
+    }
+
+    /* === Center kazan strip: TWO narrow vertical kazans side-by-side, full height ===
+       Mancala convention: YOUR kazan is on YOUR right side, opponent's on left.
+       Since your pits are on the LEFT column, your kazan = right half of center,
+       opponent's kazan = left half of center. */
+    .kazans-col {
+        flex: 0 0 auto;
+        width: 64px;
+        margin: 0;
+        flex-direction: row;
+        gap: 3px;
+        align-items: stretch;
+        justify-content: center;
+    }
+    /* SWAP order so: LEFT center = opponent (black), RIGHT center = you (white) */
+    #kazan-black { order: 1; }
+    #kazan-white { order: 2; }
+    .kazan {
+        flex: 1;
+        width: auto;
+        min-height: 0;
+        height: 100%;
+        flex-direction: column;
+        align-items: center;
+        padding: 4px 2px;
+        gap: 4px;
+        border-radius: 10px;
+        overflow: hidden;
+    }
+    .kazan-info {
+        min-width: 0;
+        gap: 0;
+        flex-shrink: 0;
+        align-items: center;
+    }
+    .kazan-score {
+        font-size: 17px;
+        line-height: 1;
+    }
+    .kazan-label {
+        display: none;              /* tight space — show only number */
+    }
+    /* Stones fill from bottom up — visual progress indicator */
+    .kazan-stones {
+        display: flex !important;
+        flex-direction: row;
+        flex-wrap: wrap-reverse;    /* fill from bottom */
+        align-content: flex-start;
+        justify-content: center;
+        gap: 1px;
+        flex: 1;
+        width: 100%;
+        padding: 0;
+        overflow: hidden;
+    }
+    .kazan-stones .stone {
+        width: 6px !important;
+        height: 6px !important;
+    }
+
+    /* === Controls under board === */
+    .board-controls {
+        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 6px;
+        justify-content: center;
+    }
+    .board-controls .btn {
+        font-size: 12px;
+        padding: 6px 10px;
+    }
+
+    .replay-controls { gap: 4px; }
+    .replay-controls .btn { font-size: 12px; padding: 4px 8px; }
+    .test-controls { gap: 4px; flex-wrap: wrap; justify-content: center; }
+    .test-controls .btn { font-size: 12px; padding: 4px 8px; }
+    .replay-info { font-size: 11px; }
+
+    .status-line { font-size: 12px; padding: 4px; }
+
+    /* === Side panel below board === */
+    .side-panel {
+        width: 100%;
+        max-width: 100%;
+        gap: 6px;
+    }
+    .panel-card { font-size: 12px; }
+    .panel-header { font-size: 12px; padding: 6px 10px; }
+    .panel-body { padding: 6px 10px; }
+
+    /* History banner sits ABOVE the rotated board */
+    .history-banner {
+        font-size: 10px;
+        padding: 1px 8px;
+    }
+}
+
+/* Tighten further on small phones */
+@media (max-width: 380px) {
+    .pit { min-height: 46px; padding: 3px 6px; }
+    .stone-count { font-size: 16px; }
+    .kazans-col { width: 48px; }
+    .kazan-score { font-size: 14px; }
+    .player-bar .score-box { font-size: 14px; }
+}
 </style>
 </head>
 <body>
@@ -613,10 +1089,26 @@ body {
         <div class="lobby-section">
             <div class="lobby-label">Қозғалтқыш уақыты</div>
             <div class="lobby-options" id="time-options">
-                <div class="lobby-opt" data-value="1000" onclick="selectOption('time-options',this)">1с</div>
-                <div class="lobby-opt selected" data-value="3000" onclick="selectOption('time-options',this)">3с</div>
                 <div class="lobby-opt" data-value="5000" onclick="selectOption('time-options',this)">5с</div>
                 <div class="lobby-opt" data-value="10000" onclick="selectOption('time-options',this)">10с</div>
+                <div class="lobby-opt" data-value="15000" onclick="selectOption('time-options',this)">15с</div>
+                <div class="lobby-opt selected" data-value="30000" onclick="selectOption('time-options',this)">30с</div>
+                <div class="lobby-opt" data-value="60000" onclick="selectOption('time-options',this)">60с</div>
+                <div class="lobby-opt" data-value="120000" onclick="selectOption('time-options',this)">120с</div>
+            </div>
+        </div>
+
+        <div class="lobby-section">
+            <div class="lobby-label">Дебюттік кітап 📖</div>
+            <div class="lobby-options" id="book-options">
+                <div class="lobby-opt selected" data-value="1" onclick="selectOption('book-options',this)">
+                    Қосылған
+                    <div class="opt-sub">ашылыста кітап жүрістерін қолдану</div>
+                </div>
+                <div class="lobby-opt" data-value="0" onclick="selectOption('book-options',this)">
+                    Өшірулі
+                    <div class="opt-sub">кітапсыз — қозғалтқыш әр позицияны өзі ойлайды</div>
+                </div>
             </div>
         </div>
 
@@ -631,6 +1123,10 @@ body {
                     Талдау
                     <div class="opt-sub">жүрістерді талдау</div>
                 </div>
+                <div class="lobby-opt" data-value="tournament" onclick="selectOption('mode-options',this)">
+                    🏆 Турнир
+                    <div class="opt-sub">толық ақпарат</div>
+                </div>
             </div>
         </div>
 
@@ -644,6 +1140,10 @@ body {
     <div class="history-header">
         <button class="btn btn-dark" onclick="hideHistory()">← Артқа</button>
         <h2>Ойын тарихы</h2>
+        <div class="history-filter">
+            <label><input type="checkbox" id="hist-filter-trivial" checked onchange="rerenderHistory()"> Тек ұзын ойындар (≥10)</label>
+            <label><input type="checkbox" id="hist-filter-finished" onchange="rerenderHistory()"> Тек аяқталған</label>
+        </div>
     </div>
     <div class="history-list" id="history-list">
         <div class="history-empty">Жүктелуде...</div>
@@ -695,6 +1195,14 @@ body {
             <span class="score-box" id="bottom-score">0</span>
         </div>
 
+        <div class="last-move-banner" id="last-move-banner">
+            <span class="who" id="lmb-who">—</span>
+            <span id="lmb-from">—</span>
+            <span class="move-arrow">→</span>
+            <span id="lmb-to">—</span>
+            <span class="capture-info" id="lmb-cap"></span>
+        </div>
+
         <div class="board-controls" id="game-controls">
             <button class="btn btn-gold" onclick="goToLobby()">Жаңа ойын</button>
             <button class="btn btn-dark" onclick="undoMove()">Артқа</button>
@@ -705,7 +1213,18 @@ body {
             <span class="replay-info" id="replay-info">0 / 0</span>
             <button class="btn btn-dark btn-sm" onclick="replayNext()">▶</button>
             <button class="btn btn-dark btn-sm" onclick="replayLast()">⏭</button>
-            <button class="btn btn-gold btn-sm" style="margin-left:10px" onclick="exitReplay()">Шығу</button>
+            <button class="btn btn-orange btn-sm" style="margin-left:6px" onclick="continueFromHere()" title="Қозғалтқышпен ойнау">▶ Ойнау</button>
+            <button class="btn btn-blue btn-sm" style="margin-left:4px" onclick="enterTestMode()" title="Екі түсті де өзің жүресің — нұсқаларды тексеру үшін">🧪 Тест</button>
+            <button class="btn btn-gold btn-sm" style="margin-left:6px" onclick="exitReplay()">Шығу</button>
+        </div>
+
+        <div class="test-controls" id="test-controls" style="display:none">
+            <span class="test-badge">🧪 ТЕСТ</span>
+            <span class="test-info" id="test-info">0 жүріс</span>
+            <button class="btn btn-dark btn-sm" onclick="testUndo()" title="Соңғы тест жүрісін кері қайтару">↶ Кері</button>
+            <button class="btn btn-dark btn-sm" onclick="testReset()" title="Бастапқы позицияға оралу">⟲ Қайта бастау</button>
+            <button class="btn btn-orange btn-sm" onclick="testAskEngine()" title="Қозғалтқыш не айтады?">💡 Кеңес</button>
+            <button class="btn btn-gold btn-sm" onclick="exitTestMode()">✕ Шығу</button>
         </div>
         <div class="status-line" id="status"></div>
     </div>
@@ -757,6 +1276,101 @@ body {
 </div>
 </div>
 
+<!-- Tournament Panel -->
+<div class="tournament-panel" id="tournament-panel">
+    <div class="tour-header" id="tour-header">
+        <span><span class="live-dot"></span>🏆 ТУРНИР</span>
+        <button class="tour-panel-close" onclick="toggleTournamentPanel()" title="Жасыру">×</button>
+    </div>
+
+    <!-- Engine thinking timer -->
+    <div class="tour-section">
+        <div class="tour-section-title">Қозғалтқыш ойлану</div>
+        <div class="tour-timer" id="tour-timer">0.0с</div>
+        <div class="tour-progress"><div class="tour-progress-fill" id="tour-timer-bar" style="width:0%"></div></div>
+        <div class="tour-grid" style="margin-top:8px">
+            <span class="lbl">Күту уақыты:</span>
+            <span class="val" id="tour-limit">30с</span>
+            <span class="lbl">Күйі:</span>
+            <span class="val" id="tour-state">Күтуде</span>
+        </div>
+    </div>
+
+    <!-- Last move info -->
+    <div class="tour-section">
+        <div class="tour-section-title">Соңғы жүріс (Қозғалтқыш)</div>
+        <div class="tour-grid">
+            <span class="lbl">Отау:</span>
+            <span class="val highlight" id="tour-move">—</span>
+            <span class="lbl">Баға:</span>
+            <span class="val" id="tour-score">—</span>
+            <span class="lbl">Тереңдік:</span>
+            <span class="val" id="tour-depth">—</span>
+            <span class="lbl">Түйіндер:</span>
+            <span class="val" id="tour-nodes">—</span>
+            <span class="lbl">Жылдамдық:</span>
+            <span class="val" id="tour-nps">—</span>
+            <span class="lbl">Нақты уақыт:</span>
+            <span class="val" id="tour-actual-time">—</span>
+            <span class="lbl">Көз:</span>
+            <span class="val" id="tour-source">—</span>
+        </div>
+    </div>
+
+    <!-- Game info -->
+    <div class="tour-section">
+        <div class="tour-section-title">Ойын статистикасы</div>
+        <div class="tour-grid">
+            <span class="lbl">Жүріс №:</span>
+            <span class="val" id="tour-move-num">0</span>
+            <span class="lbl">Жүру кезегі:</span>
+            <span class="val" id="tour-turn">Ақ</span>
+            <span class="lbl">Уақыт барысы:</span>
+            <span class="val" id="tour-elapsed">0:00</span>
+        </div>
+        <div class="tour-moves-count" style="margin-top:8px">
+            <div>
+                <div class="tour-move-badge">Адам</div>
+                <div class="tour-move-count" id="tour-human-moves">0</div>
+            </div>
+            <div>
+                <div class="tour-move-badge">Қозғалтқыш</div>
+                <div class="tour-move-count" id="tour-engine-moves">0</div>
+            </div>
+            <div>
+                <div class="tour-move-badge">Кітап</div>
+                <div class="tour-move-count" id="tour-book-moves">0</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Score info -->
+    <div class="tour-section">
+        <div class="tour-section-title">Есеп (қазан)</div>
+        <div class="tour-grid">
+            <span class="lbl">Ақ:</span>
+            <span class="val" id="tour-kazan-w">0</span>
+            <span class="lbl">Қара:</span>
+            <span class="val" id="tour-kazan-b">0</span>
+            <span class="lbl">Артықшылық:</span>
+            <span class="val" id="tour-advantage">=</span>
+        </div>
+    </div>
+
+    <!-- Average thinking -->
+    <div class="tour-section">
+        <div class="tour-section-title">Қозғалтқыш орташа</div>
+        <div class="tour-grid">
+            <span class="lbl">Орташа тереңдік:</span>
+            <span class="val" id="tour-avg-depth">—</span>
+            <span class="lbl">Орташа уақыт:</span>
+            <span class="val" id="tour-avg-time">—</span>
+            <span class="lbl">Макс. тереңдік:</span>
+            <span class="val" id="tour-max-depth">—</span>
+        </div>
+    </div>
+</div>
+
 <!-- Modal -->
 <div class="modal-overlay" id="modal">
     <div class="modal">
@@ -774,6 +1388,7 @@ let gameStates = [];
 let moveNotation = [];
 let humanSide = 0;
 let engineTimeMs = 3000;
+let engineUseBook = true;
 let engineThinking = false;
 let gameOver = false;
 let lastMove = null;
@@ -782,6 +1397,22 @@ let currentMode = 'game';
 let viewIndex = -1;
 let detailsOpen = false;
 let sessionId = generateSessionId();
+
+// Tournament state
+let tourPanelVisible = false;
+let tourTimer = null;
+let tourTimerStart = 0;
+let tourGameStart = 0;
+let tourGameTimer = null;
+let tourStats = {
+    humanMoves: 0,
+    engineMoves: 0,
+    bookMoves: 0,
+    engineTotalTime: 0,
+    engineTotalDepth: 0,
+    engineMaxDepth: 0,
+    engineSearchCount: 0,
+};
 
 function generateSessionId() {
     return 'g_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -827,15 +1458,28 @@ function startGame() {
     humanSide = parseInt(getSelectedValue('side-options'));
     engineTimeMs = parseInt(getSelectedValue('time-options'));
     currentMode = getSelectedValue('mode-options');
+    engineUseBook = (parseInt(getSelectedValue('book-options') || '1') === 1);
 
     document.getElementById('lobby').classList.add('hidden');
     document.getElementById('game-screen').classList.add('active');
 
-    // Set mode tabs
-    document.getElementById('tab-game').className = 'mode-tab' + (currentMode==='game' ? ' active' : '');
-    document.getElementById('tab-analysis').className = 'mode-tab' + (currentMode==='analysis' ? ' active' : '');
+    // If tournament mode, default side-panel to game, show tournament overlay
+    const sideTabMode = (currentMode === 'tournament') ? 'game' : currentMode;
+    document.getElementById('tab-game').className = 'mode-tab' + (sideTabMode==='game' ? ' active' : '');
+    document.getElementById('tab-analysis').className = 'mode-tab' + (sideTabMode==='analysis' ? ' active' : '');
+
+    // Show tournament panel if selected
+    if(currentMode === 'tournament'){
+        tourPanelVisible = true;
+        document.getElementById('tournament-panel').classList.add('visible');
+    } else {
+        tourPanelVisible = false;
+        document.getElementById('tournament-panel').classList.remove('visible');
+    }
 
     newGame();
+
+    if(tourPanelVisible) initTournamentPanel();
 }
 
 // ===== FORMATTING =====
@@ -936,7 +1580,9 @@ function makeMove(state, pit) {
             }
         }
     }
-    lastMove = {side:me, pit:pit, landSide:landSide, landPit:landPit};
+    const captured = state.kazan[me] - snapshot.kazan[me];
+    const tuzdykCreated = (snapshot.tuzdyk[me] === -1 && state.tuzdyk[me] !== -1);
+    lastMove = {side:me, pit:pit, landSide:landSide, landPit:landPit, captured:captured, tuzdyk:tuzdykCreated};
     for (let side=0; side<2; side++) {
         if (state.tuzdyk[side]>=0) {
             const tp = state.tuzdyk[side], os = 1-side;
@@ -1041,6 +1687,8 @@ function renderBoard(b) {
     renderKazanStones('kazan-w-stones', b.kazan[0]);
     renderKazanStones('kazan-b-stones', b.kazan[1]);
 
+    updateLastMoveBanner(b);
+
     const isWhiteTurn = b.side_to_move === 0;
     if (humanSide === 0) {
         document.getElementById('bottom-turn').className = 'turn-badge' + (isWhiteTurn ? '' : ' hidden');
@@ -1051,9 +1699,33 @@ function renderBoard(b) {
     }
 }
 
+function updateLastMoveBanner(b) {
+    const banner = document.getElementById('last-move-banner');
+    if (!lastMove || lastMove.landSide < 0) {
+        banner.classList.remove('visible');
+        return;
+    }
+    const isPlayer = (lastMove.side === humanSide);
+    const who = document.getElementById('lmb-who');
+    who.textContent = isPlayer ? 'Сіз' : 'Қозғалтқыш';
+    who.className = 'who ' + (isPlayer ? 'player' : 'engine');
+    document.getElementById('lmb-from').textContent =
+        (isPlayer ? 'Ақ' : 'Қара') + ' ' + (lastMove.pit + 1);
+    document.getElementById('lmb-to').textContent =
+        (lastMove.landSide === 0 ? 'Ақ' : 'Қара') + ' ' + (lastMove.landPit + 1);
+    const cap = document.getElementById('lmb-cap');
+    let parts = [];
+    if (lastMove.captured) parts.push('+' + lastMove.captured);
+    if (lastMove.tuzdyk) parts.push('ТҰЗ');
+    cap.textContent = parts.length ? '· ' + parts.join(' · ') : '';
+    banner.classList.add('visible');
+}
+
 function renderKazanStones(id, count) {
     const c=document.getElementById(id); c.innerHTML='';
-    const show=Math.min(count,10);
+    // Show all stones (capped at 82 = max possible) for visual fill.
+    // CSS handles per-stone size: desktop ~11px, mobile ~6px (in @media).
+    const show=Math.min(count,82);
     const SZ=11;
     for(let i=0;i<show;i++){
         const s=document.createElement('div'); s.className='stone';
@@ -1064,17 +1736,29 @@ function renderKazanStones(id, count) {
 function createPit(side, idx, b, isLive) {
     const div=document.createElement('div');
     div.className='pit'; div.dataset.side=side; div.dataset.pit=idx;
+    div.dataset.pitLabel = (idx + 1);
     const stones=b.pits[side][idx];
 
-    if(lastMove && isLive){
-        if(lastMove.side===side && lastMove.pit===idx) div.classList.add('move-source');
-        if(lastMove.landSide===side && lastMove.landPit===idx) div.classList.add('move-land');
+    if(lastMove && (isLive || isViewingHistory())){
+        // Distinguish player move (blue) from engine move (red)
+        const isPlayerMove = (lastMove.side === humanSide);
+        const srcCls = isPlayerMove ? 'move-src-player' : 'move-src-engine';
+        const landCls = isPlayerMove ? 'move-land-player' : 'move-land-engine';
+        if(lastMove.side===side && lastMove.pit===idx) div.classList.add(srcCls);
+        if(lastMove.landSide===side && lastMove.landPit===idx) div.classList.add(landCls);
     }
     if(b.tuzdyk[1-side]===idx){
         div.classList.add('tuzdyk');
         const m=document.createElement('span'); m.className='tuzdyk-marker'; m.textContent='ТҰЗ'; div.appendChild(m);
     }
-    if(isLive && side===humanSide && b.side_to_move===humanSide && !engineThinking && !animating && !gameOver && isValidMove(b,idx)){
+    if (testMode) {
+        // In test mode either side can be played by human; pit is clickable iff
+        // it belongs to the side-to-move and is a legal move.
+        if (side === b.side_to_move && !animating && !gameOver && isValidMove(b, idx)) {
+            div.classList.add('clickable');
+            div.onclick = () => testMove(idx);
+        }
+    } else if(isLive && side===humanSide && b.side_to_move===humanSide && !engineThinking && !animating && !gameOver && isValidMove(b,idx)){
         div.classList.add('clickable');
         div.onclick=()=>humanMove(idx);
     }
@@ -1169,6 +1853,132 @@ function updateAnalysis(data) {
         document.getElementById('a-nps').textContent=formatNps(data.nps);
         document.getElementById('a-time').textContent=data.time_ms+'мс';
     }
+    // Update tournament panel if visible
+    if(tourPanelVisible) updateTournamentAfterMove(data);
+}
+
+// ===== TOURNAMENT PANEL =====
+function toggleTournamentPanel(){
+    tourPanelVisible = !tourPanelVisible;
+    document.getElementById('tournament-panel').classList.toggle('visible', tourPanelVisible);
+}
+
+function initTournamentPanel(){
+    tourStats = {humanMoves:0, engineMoves:0, bookMoves:0, engineTotalTime:0, engineTotalDepth:0, engineMaxDepth:0, engineSearchCount:0};
+    tourGameStart = Date.now();
+    document.getElementById('tour-limit').textContent = (engineTimeMs/1000) + 'с';
+    document.getElementById('tour-move-num').textContent = '0';
+    document.getElementById('tour-turn').textContent = board.side_to_move === 0 ? 'Ақ' : 'Қара';
+    document.getElementById('tour-human-moves').textContent = '0';
+    document.getElementById('tour-engine-moves').textContent = '0';
+    document.getElementById('tour-book-moves').textContent = '0';
+    document.getElementById('tour-kazan-w').textContent = '0';
+    document.getElementById('tour-kazan-b').textContent = '0';
+    document.getElementById('tour-advantage').textContent = '=';
+    document.getElementById('tour-move').textContent = '—';
+    document.getElementById('tour-score').textContent = '—';
+    document.getElementById('tour-depth').textContent = '—';
+    document.getElementById('tour-nodes').textContent = '—';
+    document.getElementById('tour-nps').textContent = '—';
+    document.getElementById('tour-actual-time').textContent = '—';
+    document.getElementById('tour-source').textContent = '—';
+    document.getElementById('tour-avg-depth').textContent = '—';
+    document.getElementById('tour-avg-time').textContent = '—';
+    document.getElementById('tour-max-depth').textContent = '—';
+    startTourGameTimer();
+}
+
+function startTourTimer(){
+    tourTimerStart = Date.now();
+    document.getElementById('tour-state').textContent = 'Ойлануда...';
+    document.getElementById('tour-header').classList.add('thinking');
+    if(tourTimer) clearInterval(tourTimer);
+    tourTimer = setInterval(()=>{
+        const elapsed = (Date.now() - tourTimerStart) / 1000;
+        document.getElementById('tour-timer').textContent = elapsed.toFixed(1) + 'с';
+        const pct = Math.min(100, (elapsed*1000/engineTimeMs)*100);
+        document.getElementById('tour-timer-bar').style.width = pct + '%';
+        document.getElementById('tour-timer').classList.toggle('warning', pct > 80);
+    }, 100);
+}
+
+function stopTourTimer(){
+    if(tourTimer){ clearInterval(tourTimer); tourTimer = null; }
+    document.getElementById('tour-state').textContent = 'Күтуде';
+    document.getElementById('tour-header').classList.remove('thinking');
+    document.getElementById('tour-timer').classList.remove('warning');
+}
+
+function startTourGameTimer(){
+    if(tourGameTimer) clearInterval(tourGameTimer);
+    tourGameTimer = setInterval(()=>{
+        if(!tourPanelVisible) return;
+        const sec = Math.floor((Date.now() - tourGameStart)/1000);
+        const m = Math.floor(sec/60);
+        const s = sec % 60;
+        document.getElementById('tour-elapsed').textContent = m + ':' + (s<10?'0':'') + s;
+    }, 1000);
+}
+
+function updateTournamentAfterMove(data){
+    stopTourTimer();
+    tourStats.engineMoves++;
+    if(data.book){
+        tourStats.bookMoves++;
+        document.getElementById('tour-move').innerHTML = (data.bestmove+1) + ' <span class="book-badge">КІТАП</span>';
+        document.getElementById('tour-score').textContent = '—';
+        document.getElementById('tour-depth').textContent = 'Кітапхана';
+        document.getElementById('tour-nodes').textContent = '—';
+        document.getElementById('tour-nps').textContent = '—';
+        document.getElementById('tour-actual-time').textContent = 'лезде';
+        document.getElementById('tour-source').textContent = 'Кітап';
+    } else {
+        tourStats.engineTotalTime += data.time_ms;
+        tourStats.engineTotalDepth += data.depth;
+        tourStats.engineSearchCount++;
+        if(data.depth > tourStats.engineMaxDepth) tourStats.engineMaxDepth = data.depth;
+
+        document.getElementById('tour-move').textContent = 'Отау ' + (data.bestmove+1);
+        const scoreEl = document.getElementById('tour-score');
+        scoreEl.textContent = formatScore(data.score);
+        scoreEl.className = 'val ' + (data.score > 20 ? 'positive' : data.score < -20 ? 'negative' : '');
+        document.getElementById('tour-depth').textContent = data.depth;
+        document.getElementById('tour-nodes').textContent = formatNodes(data.nodes);
+        document.getElementById('tour-nps').textContent = formatNps(data.nps);
+        document.getElementById('tour-actual-time').textContent = (data.time_ms/1000).toFixed(1) + 'с';
+        document.getElementById('tour-source').textContent = 'Іздеу';
+
+        if(tourStats.engineSearchCount > 0){
+            const avgD = (tourStats.engineTotalDepth / tourStats.engineSearchCount).toFixed(1);
+            const avgT = (tourStats.engineTotalTime / tourStats.engineSearchCount / 1000).toFixed(1);
+            document.getElementById('tour-avg-depth').textContent = avgD;
+            document.getElementById('tour-avg-time').textContent = avgT + 'с';
+            document.getElementById('tour-max-depth').textContent = tourStats.engineMaxDepth;
+        }
+    }
+    document.getElementById('tour-engine-moves').textContent = tourStats.engineMoves;
+    document.getElementById('tour-book-moves').textContent = tourStats.bookMoves;
+    updateTournamentState();
+}
+
+function updateTournamentState(){
+    if(!tourPanelVisible) return;
+    document.getElementById('tour-move-num').textContent = moveHistory.length;
+    document.getElementById('tour-turn').textContent = board.side_to_move === 0 ? 'Ақ' : 'Қара';
+    document.getElementById('tour-kazan-w').textContent = board.kazan[0];
+    document.getElementById('tour-kazan-b').textContent = board.kazan[1];
+    const diff = board.kazan[0] - board.kazan[1];
+    const advEl = document.getElementById('tour-advantage');
+    if(diff > 0){ advEl.textContent = 'Ақ +' + diff; advEl.className = 'val positive'; }
+    else if(diff < 0){ advEl.textContent = 'Қара +' + (-diff); advEl.className = 'val negative'; }
+    else { advEl.textContent = '='; advEl.className = 'val'; }
+}
+
+function onHumanMoveTournament(){
+    if(!tourPanelVisible) return;
+    tourStats.humanMoves++;
+    document.getElementById('tour-human-moves').textContent = tourStats.humanMoves;
+    updateTournamentState();
 }
 
 // ===== GAME FLOW =====
@@ -1224,6 +2034,8 @@ async function humanMove(pit) {
         });
     } catch(e){}
 
+    onHumanMoveTournament();
+
     const result=getGameResult(board);
     if(result){ showResult(result); return; }
     engineMove();
@@ -1232,13 +2044,14 @@ async function humanMove(pit) {
 async function engineMove() {
     if(gameOver) return;
     engineThinking=true;
+    if(tourPanelVisible) startTourTimer();
     setStatus('Қозғалтқыш ойлануда...');
     renderBoard(board);
 
     try {
         const resp=await apiFetch('/api/move',{
             method:'POST', headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({board:board, time_ms:engineTimeMs})
+            body:JSON.stringify({board:board, time_ms:engineTimeMs, use_book:engineUseBook})
         });
         const data=await resp.json();
 
@@ -1319,6 +2132,9 @@ let replayMoves = [];
 let replayStates = [];
 let replayIndex = 0;
 
+// Cache fetched games so re-rendering on filter change is instant
+let _historyGamesCache = null;
+
 async function showHistory() {
     document.getElementById('lobby').classList.add('hidden');
     document.getElementById('history-screen').classList.add('active');
@@ -1328,39 +2144,63 @@ async function showHistory() {
         const resp = await fetch('/api/games');
         const data = await resp.json();
         if (!data.games || data.games.length === 0) {
+            _historyGamesCache = [];
             listEl.innerHTML = '<div class="history-empty">Ойындар тарихы бос</div>';
             return;
         }
-        listEl.innerHTML = '';
-        // Show newest first
-        const games = data.games.slice().reverse();
-        for (let i = 0; i < games.length; i++) {
-            const g = games[i];
-            const item = document.createElement('div');
-            item.className = 'history-item';
-
-            const resultText = getResultText(g.result);
-            const resultClass = getResultClass(g.result);
-            const dateStr = g.start_time ? new Date(g.start_time).toLocaleString('kk-KZ') : '—';
-            const numMoves = g.num_moves || (g.moves ? g.moves.length : 0);
-
-            item.innerHTML = `
-                <div class="game-info">
-                    <div class="game-date">${dateStr}</div>
-                    <div class="game-result ${resultClass}">${resultText}</div>
-                    <div class="game-moves">${numMoves} жүріс</div>
-                </div>
-                <button class="game-replay" data-idx="${i}">Қайта көру</button>
-            `;
-            item.querySelector('.game-replay').onclick = (e) => {
-                e.stopPropagation();
-                startReplay(games[i]);
-            };
-            item.onclick = () => startReplay(games[i]);
-            listEl.appendChild(item);
-        }
+        _historyGamesCache = data.games.slice().reverse();   // newest first
+        rerenderHistory();
     } catch(e) {
         listEl.innerHTML = '<div class="history-empty">Қате: ' + e.message + '</div>';
+    }
+}
+
+function rerenderHistory() {
+    const listEl = document.getElementById('history-list');
+    if (!_historyGamesCache) return;
+    const onlyLong = document.getElementById('hist-filter-trivial').checked;
+    const onlyFinished = document.getElementById('hist-filter-finished').checked;
+    const games = _historyGamesCache.filter(g => {
+        const n = g.num_moves || (g.moves ? g.moves.length : 0);
+        if (onlyLong && n < 10) return false;
+        if (onlyFinished && (!g.result || g.result === 'abandoned')) return false;
+        return true;
+    });
+    const totalRaw = _historyGamesCache.length;
+    if (games.length === 0) {
+        listEl.innerHTML = `<div class="history-empty">Сүзгі бойынша табылған жоқ (барлығы: ${totalRaw})</div>`;
+        return;
+    }
+    listEl.innerHTML = '';
+    const summary = document.createElement('div');
+    summary.style.cssText = 'color:#8D6E63;font-size:12px;margin-bottom:8px;text-align:right';
+    summary.textContent = `${games.length} / ${totalRaw} ойын`;
+    listEl.appendChild(summary);
+
+    for (let i = 0; i < games.length; i++) {
+        const g = games[i];
+        const item = document.createElement('div');
+        item.className = 'history-item';
+        const resultText = getResultText(g.result);
+        const resultClass = getResultClass(g.result);
+        const dateStr = g.start_time ? new Date(g.start_time).toLocaleString('kk-KZ') : '—';
+        const numMoves = g.num_moves || (g.moves ? g.moves.length : 0);
+        const buildBadge = g.engine_build ? '<span class="build-badge">v.new</span>' : '';
+
+        item.innerHTML = `
+            <div class="game-info">
+                <div class="game-date">${dateStr} ${buildBadge}</div>
+                <div class="game-result ${resultClass}">${resultText}</div>
+                <div class="game-moves">${numMoves} жүріс</div>
+            </div>
+            <button class="game-replay">Қайта көру</button>
+        `;
+        item.querySelector('.game-replay').onclick = (e) => {
+            e.stopPropagation();
+            startReplay(g);
+        };
+        item.onclick = () => startReplay(g);
+        listEl.appendChild(item);
     }
 }
 
@@ -1410,6 +2250,8 @@ function startReplay(gameData) {
             const side = b.side_to_move;
             if (!isValidMove(b, pit)) continue;
             makeMove(b, pit);
+            // Capture full move metadata (lastMove was just set by makeMove)
+            const lm = lastMove;
             replayStates.push(cloneBoard(b));
             replayMoves.push({
                 side: side,
@@ -1417,14 +2259,22 @@ function startReplay(gameData) {
                 source: m.who || 'unknown',
                 score: m.score,
                 depth: m.depth,
+                landSide: lm ? lm.landSide : -1,
+                landPit:  lm ? lm.landPit  : -1,
+                captured: lm ? lm.captured : 0,
+                tuzdyk:   lm ? lm.tuzdyk   : false,
             });
         }
     }
 
-    // Setup UI
-    humanSide = 0;
-    document.getElementById('bottom-name').textContent = 'Ақ';
-    document.getElementById('top-name').textContent = 'Қара';
+    // Setup UI — restore who was the human in this recorded game
+    let recordedHumanColor = gameData.human_color;
+    if (!recordedHumanColor && gameData.moves && gameData.moves.length > 0) {
+        recordedHumanColor = (gameData.moves[0].who === 'human') ? 'white' : 'black';
+    }
+    humanSide = (recordedHumanColor === 'black') ? 1 : 0;
+    document.getElementById('bottom-name').textContent = 'Адам (' + (humanSide === 0 ? 'Ақ' : 'Қара') + ')';
+    document.getElementById('top-name').textContent = 'Қозғалтқыш (' + (humanSide === 0 ? 'Қара' : 'Ақ') + ')';
     document.getElementById('game-controls').style.display = 'none';
     document.getElementById('replay-controls').style.display = 'flex';
 
@@ -1488,7 +2338,13 @@ function replayNext() {
     board = cloneBoard(replayStates[replayIndex]);
     if (replayIndex > 0) {
         const m = replayMoves[replayIndex - 1];
-        lastMove = {side: m.side, pit: m.pit - 1, landSide: -1, landPit: -1};
+        lastMove = {
+            side: m.side, pit: m.pit - 1,
+            landSide: (m.landSide !== undefined) ? m.landSide : -1,
+            landPit:  (m.landPit  !== undefined) ? m.landPit  : -1,
+            captured: m.captured || 0,
+            tuzdyk:   !!m.tuzdyk,
+        };
     }
     renderBoard(board);
     updateReplayInfo();
@@ -1500,7 +2356,13 @@ function replayLast() {
     board = cloneBoard(replayStates[replayIndex]);
     if (replayIndex > 0) {
         const m = replayMoves[replayIndex - 1];
-        lastMove = {side: m.side, pit: m.pit - 1, landSide: -1, landPit: -1};
+        lastMove = {
+            side: m.side, pit: m.pit - 1,
+            landSide: (m.landSide !== undefined) ? m.landSide : -1,
+            landPit:  (m.landPit  !== undefined) ? m.landPit  : -1,
+            captured: m.captured || 0,
+            tuzdyk:   !!m.tuzdyk,
+        };
     }
     renderBoard(board);
     updateReplayInfo();
@@ -1513,6 +2375,181 @@ function exitReplay() {
     goToLobby();
 }
 
+// =========================================================================
+// === TEST MODE: play any color from a saved position, try variations    ===
+// =========================================================================
+let testMode = false;
+let testBaseState = null;     // the position we started testing from
+let testHistory = [];          // stack of states for undo
+
+function enterTestMode() {
+    if (!replayMode || replayStates.length === 0) return;
+    testBaseState = cloneBoard(replayStates[replayIndex]);
+    testHistory = [];
+
+    // Switch UI from replay to test
+    replayMode = false;
+    document.getElementById('replay-controls').style.display = 'none';
+    document.getElementById('test-controls').style.display = 'flex';
+    document.getElementById('board').classList.remove('viewing-history');
+    testMode = true;
+    gameOver = false;
+    engineThinking = false;
+    animating = false;
+    lastMove = null;
+    moveNotation = [];
+    gameStates = [];
+    viewIndex = -1;
+
+    board = cloneBoard(testBaseState);
+    document.getElementById('top-name').textContent = 'Қара (тест)';
+    document.getElementById('bottom-name').textContent = 'Ақ (тест)';
+    updateTestInfo();
+    renderBoard(board);
+    renderMoveList();
+    setStatus('🧪 Тест режимінде: екі түсті де өзің жүресің. Лунканы басып көріп нұсқаларды тексер.');
+}
+
+async function testMove(pit) {
+    if (!testMode || animating) return;
+    if (!isValidMove(board, pit)) return;
+    // Snapshot for undo
+    testHistory.push({
+        state: cloneBoard(board),
+        notation: [...moveNotation],
+        lastMove: lastMove ? Object.assign({}, lastMove) : null,
+    });
+    const side = board.side_to_move;
+    await animateMove(pit);
+    makeMove(board, pit);
+    moveNotation.push({ side: side, pit: pit + 1, source: 'test' });
+    updateTestInfo();
+    renderBoard(board);
+    renderMoveList();
+}
+
+function testUndo() {
+    if (!testMode || testHistory.length === 0) return;
+    const prev = testHistory.pop();
+    board = prev.state;
+    moveNotation = prev.notation;
+    lastMove = prev.lastMove;
+    gameOver = false;
+    updateTestInfo();
+    renderBoard(board);
+    renderMoveList();
+    setStatus('↶ Соңғы тест жүрісі қайтарылды');
+}
+
+function testReset() {
+    if (!testMode || !testBaseState) return;
+    board = cloneBoard(testBaseState);
+    testHistory = [];
+    moveNotation = [];
+    lastMove = null;
+    gameOver = false;
+    updateTestInfo();
+    renderBoard(board);
+    renderMoveList();
+    setStatus('⟲ Бастапқы позицияға оралдық');
+}
+
+async function testAskEngine() {
+    if (!testMode) return;
+    setStatus('💭 Қозғалтқыш ойланып тұр…');
+    try {
+        const resp = await fetch('/api/move', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                board: { pits: board.pits, kazan: board.kazan,
+                         tuzdyk: board.tuzdyk, side_to_move: board.side_to_move },
+                time_ms: 3000,
+                use_book: false,
+            }),
+        });
+        const data = await resp.json();
+        if (data.bestmove !== undefined) {
+            const pit = data.bestmove + 1;
+            const side = board.side_to_move === 0 ? 'Ақ' : 'Қара';
+            setStatus(`💡 Қозғалтқыш ұсынады: ${side} лунка ${pit} (баға ${data.score}, тереңдік ${data.depth})`);
+            // Briefly highlight the suggested pit
+            const pitEl = document.querySelector(`.pit[data-side="${board.side_to_move}"][data-pit="${data.bestmove}"]`);
+            if (pitEl) {
+                pitEl.style.outline = '4px solid #FFD54F';
+                pitEl.style.outlineOffset = '-2px';
+                setTimeout(() => { pitEl.style.outline = ''; pitEl.style.outlineOffset = ''; }, 3000);
+            }
+        } else {
+            setStatus('Қате: ' + (data.error || 'жауап жоқ'));
+        }
+    } catch(e) {
+        setStatus('Қате: ' + e.message);
+    }
+}
+
+function exitTestMode() {
+    testMode = false;
+    testBaseState = null;
+    testHistory = [];
+    document.getElementById('test-controls').style.display = 'none';
+    goToLobby();
+}
+
+function updateTestInfo() {
+    const el = document.getElementById('test-info');
+    if (el) el.textContent = (testHistory.length || 0) + ' жүріс';
+}
+
+/* Fork the current replay position into a fresh playable game.
+   The user picks which side to play; engine takes the other.
+   Reset all per-game state but seed it from replayStates[replayIndex]. */
+async function continueFromHere() {
+    if (!replayMode || replayStates.length === 0) return;
+    const startBoard = cloneBoard(replayStates[replayIndex]);
+
+    // Ask which side the human wants to play from this position
+    const stm = startBoard.side_to_move;
+    const ans = confirm(
+        'Осы позициядан бастап ойнау?\n\n' +
+        'OK — '+ (stm === 0 ? 'Ақ' : 'Қара') +' ретінде (қазір жүру кезек)\n' +
+        'Cancel — '+ (stm === 0 ? 'Қара' : 'Ақ') +' ретінде'
+    );
+    const newHumanSide = ans ? stm : (1 - stm);
+
+    // Tell server to clear engine's per-session memory so it doesn't think
+    // we're mid-game. New game starts from the given position via 'pos' parameter.
+    try { await fetch('/api/newgame', {method:'POST'}); } catch(e) {}
+
+    // Reset state
+    replayMode = false;
+    document.getElementById('replay-controls').style.display = 'none';
+    document.getElementById('game-controls').style.display = 'flex';
+    document.getElementById('board').classList.remove('viewing-history');
+
+    humanSide = newHumanSide;
+    board = startBoard;
+    gameStates = [cloneBoard(board)];
+    moveNotation = [];
+    lastMove = null;
+    viewIndex = -1;
+    gameOver = false;
+    engineThinking = false;
+    animating = false;
+
+    // Update player bar names/labels
+    document.getElementById('bottom-name').textContent = 'Сіз (' + (humanSide === 0 ? 'Ақ' : 'Қара') + ')';
+    document.getElementById('top-name').textContent = 'Қозғалтқыш (' + (humanSide === 0 ? 'Қара' : 'Ақ') + ')';
+
+    renderBoard(board);
+    renderMoveList();
+
+    // If engine's turn now, kick it off
+    if (board.side_to_move !== humanSide) {
+        setTimeout(engineMove, 200);
+    }
+}
+
 // Override viewMove for replay mode
 const _origViewMove = viewMove;
 viewMove = function(idx) {
@@ -1521,7 +2558,16 @@ viewMove = function(idx) {
         board = cloneBoard(replayStates[replayIndex]);
         if (replayIndex > 0) {
             const m = replayMoves[replayIndex - 1];
-            lastMove = {side: m.side, pit: m.pit - 1, landSide: -1, landPit: -1};
+            lastMove = {
+                side: m.side,
+                pit: m.pit - 1,
+                landSide: (m.landSide !== undefined) ? m.landSide : -1,
+                landPit:  (m.landPit  !== undefined) ? m.landPit  : -1,
+                captured: m.captured || 0,
+                tuzdyk:   !!m.tuzdyk,
+            };
+        } else {
+            lastMove = null;
         }
         renderBoard(board);
         updateReplayInfo();

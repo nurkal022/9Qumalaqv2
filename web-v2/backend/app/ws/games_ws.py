@@ -173,7 +173,10 @@ async def games_ws(ws: WebSocket, game_id: int) -> None:
                 replayed = True
 
         if not replayed:
-            # Send fresh snapshot.
+            # Send fresh snapshot. Wrap the actual send in a guard — if the client
+            # disconnected between accept and now, the WS is in DISCONNECTED state
+            # and send_json would crash uvicorn's ASGI dispatch.
+            from starlette.websockets import WebSocketState
             async with SessionLocal() as s:
                 g = await _load_game_in_session(s, game_id)
                 if g is None:
@@ -181,13 +184,17 @@ async def games_ws(ws: WebSocket, game_id: int) -> None:
                     return
                 snap_msg = _snapshot_msg(g)
             _publish(game_id, snap_msg)
-            # The _publish call just added it to the queue; drain it so we don't
-            # double-send below in the writer loop.
             try:
                 queued = client_q.get_nowait()
-                await ws.send_json(queued)
             except asyncio.QueueEmpty:
-                await ws.send_json(snap_msg)
+                queued = snap_msg
+            try:
+                if ws.client_state == WebSocketState.CONNECTED:
+                    await ws.send_json(queued)
+            except (WebSocketDisconnect, RuntimeError):
+                # Client disappeared during the handshake — clean up and exit.
+                _clients[game_id].discard(client_q)
+                return
 
         # 5. Get engine pool from app state.
         engine: EnginePool = ws.app.state.engine_pool
@@ -196,9 +203,13 @@ async def games_ws(ws: WebSocket, game_id: int) -> None:
         stop_event = asyncio.Event()
 
         async def writer() -> None:
+            from starlette.websockets import WebSocketState
             while not stop_event.is_set():
                 try:
                     msg = await asyncio.wait_for(client_q.get(), timeout=1.0)
+                    if ws.client_state != WebSocketState.CONNECTED:
+                        # Client gone; stop trying to send.
+                        break
                     await ws.send_json(msg)
                 except asyncio.TimeoutError:
                     continue
