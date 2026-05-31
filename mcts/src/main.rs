@@ -14,7 +14,7 @@ use std::thread;
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "rust-mcts")]
+#[command(name = "mcts")]
 #[command(about = "Fast MCTS self-play for Togyz Kumalak")]
 struct Args {
     /// Path to ONNX model file
