@@ -12,7 +12,3 @@ rand_distr = "0.4"
 clap = { version = "4", features = ["derive"] }
 tempfile = "3"
 togyzkumalaq-core = { path = "../core" }
-
-[profile.release]
-opt-level = 3
-lto = true

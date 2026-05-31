@@ -1,33 +1,53 @@
-# 9QumalaqV2 — Togyzkumalak engine & training infrastructure
+# 9QumalaqV2 — Togyzkumalak engine, training & product
 
-This repository hosts two independent production engines for the Togyzkumalak board game and a web interface that serves them.
+A monorepo organized into clean zones: shared game rules, two Rust engines, the
+player-facing product, the research/experiment pipeline, and blessed champion
+artifacts.
 
 ## Layout
 
 | Path | Purpose |
 |---|---|
-| [`engine/`](engine/) | NNUE search engine (Rust). Production binary deployed to LAN server. |
-| [`rust-mcts/`](rust-mcts/) | MCTS training and evaluation infrastructure (Rust + Python). |
-| [`web/`](web/) | Flask web interface and opening-book server. |
-| [`docs/`](docs/) | Design specs and implementation plans (under `docs/superpowers/`). |
-| [`archive/`](archive/) | Historical and experimental material — gitignored. See `archive/README.md` for layout. |
-| `deploy_lan.py` | Deployment script for the LAN server. |
+| [`core/`](core/) | `togyzkumalaq-core` crate — the single source of truth for game rules (board, moves, position parsing). Both engines depend on it. |
+| [`engine/`](engine/) | Classical NNUE/alpha-beta search engine (Rust). |
+| [`mcts/`](mcts/) | AlphaZero-style MCTS engine (Rust). |
+| [`product/web/`](product/web/) | The product: FastAPI backend + React/Vite frontend served to players. |
+| [`research/`](research/) | Experiment **code**: `training/`, `data/`, `eval/`, `configs/`. Each run lands in `research/runs/<date-name>/` (gitignored; only `config.yaml` + `summary.md` tracked). |
+| [`models/`](models/) | Blessed champions the product depends on — `engine/baseline` (tracked) and promoted `nets/`. See [`models/README.md`](models/README.md). |
+| [`tools/`](tools/) | Deploy / ops scripts. |
+| [`docs/`](docs/) | Design specs & implementation plans (`docs/superpowers/`). |
+| [`archive/`](archive/) | Frozen historical material — gitignored. |
 
-## Production assets
+The three Rust crates form one Cargo workspace (root `Cargo.toml`); the release
+profile (LTO) is set at the workspace root.
 
-- **NNUE weights:** [`engine/nnue_weights.bin`](engine/nnue_weights.bin)
-- **Opening book:** [`engine/opening_book.txt`](engine/opening_book.txt), [`web/opening_book.json`](web/opening_book.json)
-- **Endgame tablebase:** [`engine/egtb.bin`](engine/egtb.bin)
-- **MCTS production model:** [`rust-mcts/model_2m.trt`](rust-mcts/model_2m.trt) (+ `.onnx` source)
-- **Best MCTS checkpoint:** [`rust-mcts/checkpoints_v3/`](rust-mcts/checkpoints_v3/)
-
-## Build
+## Build & test
 
 ```bash
-cd engine    && cargo build --release
-cd rust-mcts && cargo build --release
+# Rust workspace (core + engine + mcts)
+cargo build --release          # build all crates
+cargo test  -p togyzkumalaq-core   # rules tests (board, make/unmake, parse)
+cargo test  -p togyzkumalaq-engine # engine tests
+# mcts links ONNX Runtime at runtime; set LD_LIBRARY_PATH to the nvidia pip libs to run it.
+
+# Product — backend
+cd product/web/backend && .venv/bin/python -m pytest -q
+
+# Product — frontend
+npm --prefix product/web/frontend run typecheck
+npm --prefix product/web/frontend test
+npm --prefix product/web/frontend run build
 ```
+
+## Product engine
+
+The backend serves the engine at `models/engine/baseline` (override via the
+`ENGINE_PATH` env var). Promote a stronger engine by verifying it in a serve-mode
+duel and copying it over `models/engine/baseline`.
 
 ## History
 
-Pre-2026-04-29 reports, NNUE weight experiments, and old MCTS checkpoints have been moved to `archive/`. The full project history is preserved in git.
+The full project history is preserved in git. Old/superseded material lives under
+`archive/`; large artifacts (checkpoints, datasets, build output, APKs) are
+gitignored. See `docs/superpowers/specs/` and `docs/superpowers/plans/` for the
+restructure design and plan.

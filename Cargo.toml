@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["core", "engine", "mcts"]
+
+# Release profile must live at the workspace root (member-level [profile.*] is
+# ignored in a workspace). Restores LTO + single codegen unit for the engine.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
