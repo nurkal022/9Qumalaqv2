@@ -8,7 +8,7 @@
 # 5. Compare with previous results
 
 set -e
-cd /home/nurlykhan/9QumalaqV2/rust-mcts
+cd /home/nurlykhan/9QumalaqV2/mcts
 
 NVIDIA_LIBS=/home/nurlykhan/.local/lib/python3.12/site-packages/nvidia
 export ORT_DYLIB_PATH=/home/nurlykhan/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4
@@ -75,7 +75,7 @@ fi
 log "=== Eval vs fixed engine (1-ply, 10 pairs) ==="
 for name in supervised dist_only hybrid; do
     log "Model: $name"
-    timeout 180 ./target/release/rust-mcts --eval \
+    timeout 180 ./target/release/mcts --eval \
         --model $CKPT/$name.onnx \
         --games 10 --eval-sims 1 \
         --engine /home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine \

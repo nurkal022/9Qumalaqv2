@@ -30,7 +30,7 @@ from train_alphazero import load_replay_buffer, export_onnx
 
 # ── Config ──────────────────────────────────────────────────
 
-RUST_BINARY = os.path.join(os.path.dirname(__file__), '..', 'target', 'release', 'rust-mcts')
+RUST_BINARY = os.path.join(os.path.dirname(__file__), '..', 'target', 'release', 'mcts')
 ENGINE_BINARY = os.path.join(os.path.dirname(__file__), '..', '..', 'engine', 'target', 'release', 'togyzkumalaq-engine')
 
 NVIDIA_LIBS = os.path.expanduser('~/.local/lib/python3.12/site-packages/nvidia')

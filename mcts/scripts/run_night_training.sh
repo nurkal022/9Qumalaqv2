@@ -3,7 +3,7 @@
 # Args: $1 = init checkpoint .pt path (e.g. checkpoints_v3/iter_500.pt)
 #       $2 = duration seconds (default 12600 = 3.5h)
 set -u
-cd /home/nurlykhan/9QumalaqV2/rust-mcts
+cd /home/nurlykhan/9QumalaqV2/mcts
 
 INIT_CKPT="${1:-checkpoints_v3/iter_500.pt}"
 DURATION="${2:-12600}"

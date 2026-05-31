@@ -9,14 +9,14 @@
 # Run: bash scripts/run_max.sh
 
 set -e
-cd /home/nurlykhan/9QumalaqV2/rust-mcts
+cd /home/nurlykhan/9QumalaqV2/mcts
 
 # Paths
 ENGINE=/home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine
 ENGINE_DIR=/home/nurlykhan/9QumalaqV2/engine
-DATA_DIR=/home/nurlykhan/9QumalaqV2/rust-mcts/distill_data
-CKPT_DIR=/home/nurlykhan/9QumalaqV2/rust-mcts/checkpoints_distill
-LOG=/home/nurlykhan/9QumalaqV2/rust-mcts/max_pipeline.log
+DATA_DIR=/home/nurlykhan/9QumalaqV2/mcts/distill_data
+CKPT_DIR=/home/nurlykhan/9QumalaqV2/mcts/checkpoints_distill
+LOG=/home/nurlykhan/9QumalaqV2/mcts/max_pipeline.log
 
 mkdir -p $DATA_DIR $CKPT_DIR
 
@@ -34,7 +34,7 @@ if [ $(ls $DATA_DIR/*.bin 2>/dev/null | wc -l) -lt 16 ]; then
     # 10000 games, depth 12, 16 threads
     # At ~125 games/min on depth 8, depth 12 will be ~40 games/min → ~4 hours for 10000
     ./target/release/togyzkumalaq-engine datagen 10000 12 16 $DATA_DIR/gen7 2>&1 | tee -a $LOG
-    cd /home/nurlykhan/9QumalaqV2/rust-mcts
+    cd /home/nurlykhan/9QumalaqV2/mcts
 fi
 
 log "=== Data ready: $(du -sh $DATA_DIR | cut -f1) ==="
@@ -58,7 +58,7 @@ python3 scripts/export_onnx.py $CKPT_DIR/distilled.pt \
 
 # Deep MCTS eval vs engine (20 pairs)
 log "=== Phase 4: Deep MCTS eval vs Gen7 ==="
-./target/release/rust-mcts --eval \
+./target/release/mcts --eval \
     --model $CKPT_DIR/distilled.onnx \
     --games 20 --eval-sims 200 \
     --engine $ENGINE \

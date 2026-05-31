@@ -1,7 +1,7 @@
 #!/bin/bash
 # Tournament-quality test: night_best vs both engines at 1000ms/move
 set -u
-cd /home/nurlykhan/9QumalaqV2/rust-mcts
+cd /home/nurlykhan/9QumalaqV2/mcts
 
 NVIDIA_LIBS=/home/nurlykhan/.local/lib/python3.12/site-packages/nvidia
 export ORT_DYLIB_PATH=/home/nurlykhan/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4
@@ -9,7 +9,7 @@ export LD_LIBRARY_PATH=$NVIDIA_LIBS/cublas/lib:$NVIDIA_LIBS/cuda_runtime/lib:$NV
 
 ENGINE_CUR=/home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine
 ENGINE_BASE=/home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine-baseline
-RESULTS=/home/nurlykhan/9QumalaqV2/rust-mcts/champion_test.txt
+RESULTS=/home/nurlykhan/9QumalaqV2/mcts/champion_test.txt
 
 echo "=== Tournament-quality eval (1000ms/move) ===" > $RESULTS
 echo "Date: $(date)" >> $RESULTS
@@ -25,7 +25,7 @@ for engine_name in current baseline; do
     echo "" >> $RESULTS
     echo "=== night_best vs Gen7-$engine_name (1000ms) ===" >> $RESULTS
     t0=$(date +%s)
-    timeout 2400 ./target/release/rust-mcts --eval \
+    timeout 2400 ./target/release/mcts --eval \
         --model eval_onnx_final/night_best.onnx \
         --games 20 --eval-sims 1 \
         --engine $ENG \

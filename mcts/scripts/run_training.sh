@@ -71,7 +71,7 @@ for ITER in $(seq $START_ITER $ITERATIONS); do
     SP_START=$(date +%s)
 
     ITER_BUF="$ROOT_DIR/replay_iter${ITER}.bin"
-    "$ROOT_DIR/target/release/rust-mcts" \
+    "$ROOT_DIR/target/release/mcts" \
         --model "$MODEL_ONNX" \
         --games $GAMES_PER_ITER \
         --sims $SIMS \

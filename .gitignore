@@ -102,10 +102,10 @@ Thumbs.db
 # Archive of historical/experimental material (out-of-tree, not committed)
 archive/
 
-# rust-mcts working-tree-only assets (large binaries / build outputs)
-rust-mcts/target/
-rust-mcts/checkpoints_v3/
-rust-mcts/*.trt
+# mcts working-tree-only assets (large binaries / build outputs)
+mcts/target/
+mcts/checkpoints_v3/
+mcts/*.trt
 
 # web runtime output
 web/games_log/
@@ -122,9 +122,9 @@ web-v2/frontend/dist/
 Togyz/
 /alphazero-code
 /game-pars
-rust-mcts/checkpoints_night/
-rust-mcts/eval_results*.txt
-rust-mcts/final_eval.txt
+mcts/checkpoints_night/
+mcts/eval_results*.txt
+mcts/final_eval.txt
 
 # --- restructure: forward-looking layout ignores ---
 target/

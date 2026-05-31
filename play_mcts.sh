@@ -6,7 +6,7 @@
 # Note: full search (eval-sims=200) currently regresses (value head unreliable),
 # so this serve mode uses Gumbel 1-ply selection. Strength is policy-only.
 
-cd /home/nurlykhan/9QumalaqV2/rust-mcts
+cd /home/nurlykhan/9QumalaqV2/mcts
 
 NVIDIA_LIBS=/home/nurlykhan/.local/lib/python3.12/site-packages/nvidia
 export ORT_DYLIB_PATH=/home/nurlykhan/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4
@@ -32,4 +32,4 @@ echo "  Position format: w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side"
 echo "    (side: 0=white, 1=black; tw/tb tuzdyk pit -1 if none)"
 echo ""
 
-exec ./target/release/rust-mcts --serve --model "$MODEL"
+exec ./target/release/mcts --serve --model "$MODEL"

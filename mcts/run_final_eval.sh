@@ -2,14 +2,14 @@
 # Final eval: 3-way comparison after night training.
 # Compares: starting iter_2645, training "best.pt", and final "latest.pt".
 set -u
-cd /home/nurlykhan/9QumalaqV2/rust-mcts
+cd /home/nurlykhan/9QumalaqV2/mcts
 
 NVIDIA_LIBS=/home/nurlykhan/.local/lib/python3.12/site-packages/nvidia
 export ORT_DYLIB_PATH=/home/nurlykhan/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4
 export LD_LIBRARY_PATH=$NVIDIA_LIBS/cublas/lib:$NVIDIA_LIBS/cuda_runtime/lib:$NVIDIA_LIBS/curand/lib:$NVIDIA_LIBS/cudnn/lib:$NVIDIA_LIBS/cufft/lib:${LD_LIBRARY_PATH:-}
 
 ENGINE=/home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine
-RESULTS=/home/nurlykhan/9QumalaqV2/rust-mcts/final_eval.txt
+RESULTS=/home/nurlykhan/9QumalaqV2/mcts/final_eval.txt
 ONNX_DIR=eval_onnx_final
 mkdir -p $ONNX_DIR
 
@@ -43,7 +43,7 @@ for name in start_iter_2645 night_best night_latest; do
     echo "" >> $RESULTS
     echo "--- $name vs Gen7-current ---" >> $RESULTS
     t0=$(date +%s)
-    timeout 600 ./target/release/rust-mcts --eval \
+    timeout 600 ./target/release/mcts --eval \
         --model $onnx \
         --games 20 --eval-sims 1 \
         --engine $ENGINE \
@@ -64,7 +64,7 @@ if [ -x "$ENGINE_BASE" ]; then
         if [ ! -f "$onnx" ]; then continue; fi
         echo "" >> $RESULTS
         echo "--- $name vs Gen7-baseline ---" >> $RESULTS
-        timeout 600 ./target/release/rust-mcts --eval \
+        timeout 600 ./target/release/mcts --eval \
             --model $onnx \
             --games 20 --eval-sims 1 \
             --engine $ENGINE_BASE \
