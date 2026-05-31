@@ -1,4 +1,4 @@
-mod board;
+pub(crate) use togyzkumalaq_core as board;
 mod encoding;
 mod eval_vs_engine;
 mod evaluator;
