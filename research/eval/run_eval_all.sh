@@ -2,14 +2,14 @@
 # Eval each candidate checkpoint vs Gen7 engine.
 # Sequential runs; saves results to eval_results.txt
 set -e
-cd /home/nurlykhan/9QumalaqV2/mcts
+cd /home/nurlykhan/9QumalaqV2
 
 NVIDIA_LIBS=/home/nurlykhan/.local/lib/python3.12/site-packages/nvidia
 export ORT_DYLIB_PATH=/home/nurlykhan/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4
 export LD_LIBRARY_PATH=$NVIDIA_LIBS/cublas/lib:$NVIDIA_LIBS/cuda_runtime/lib:$NVIDIA_LIBS/curand/lib:$NVIDIA_LIBS/cudnn/lib:$NVIDIA_LIBS/cufft/lib:${LD_LIBRARY_PATH:-}
 
-ENGINE=/home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine
-RESULTS=/home/nurlykhan/9QumalaqV2/mcts/eval_results.txt
+ENGINE=/home/nurlykhan/9QumalaqV2/target/release/togyzkumalaq-engine
+RESULTS=/home/nurlykhan/9QumalaqV2/research/runs/_legacy/eval_results.txt
 
 echo "=== Checkpoint vs Gen7 engine eval ===" > $RESULTS
 echo "Date: $(date)" >> $RESULTS

@@ -12,7 +12,7 @@ Key changes from v2:
 7. Temperature: τ=1.0 for 25 moves, linear decay to 0.3
 
 Usage:
-  python scripts/train_loop.py --iterations 500 --games 200 --sims 200 --model-size large2m \
+  python train_loop.py --iterations 500 --games 200 --sims 200 --model-size large2m \
       --init-checkpoint checkpoints_2m_v2/best.pt
 """
 

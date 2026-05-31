@@ -9,14 +9,14 @@
 # Run: bash scripts/run_max.sh
 
 set -e
-cd /home/nurlykhan/9QumalaqV2/mcts
+cd /home/nurlykhan/9QumalaqV2
 
 # Paths
-ENGINE=/home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine
+ENGINE=/home/nurlykhan/9QumalaqV2/target/release/togyzkumalaq-engine
 ENGINE_DIR=/home/nurlykhan/9QumalaqV2/engine
-DATA_DIR=/home/nurlykhan/9QumalaqV2/mcts/distill_data
-CKPT_DIR=/home/nurlykhan/9QumalaqV2/mcts/checkpoints_distill
-LOG=/home/nurlykhan/9QumalaqV2/mcts/max_pipeline.log
+DATA_DIR=/home/nurlykhan/9QumalaqV2/research/runs/_legacy/distill_data
+CKPT_DIR=/home/nurlykhan/9QumalaqV2/research/runs/_legacy/checkpoints_distill
+LOG=/home/nurlykhan/9QumalaqV2/research/runs/_legacy/max_pipeline.log
 
 mkdir -p $DATA_DIR $CKPT_DIR
 
@@ -34,7 +34,7 @@ if [ $(ls $DATA_DIR/*.bin 2>/dev/null | wc -l) -lt 16 ]; then
     # 10000 games, depth 12, 16 threads
     # At ~125 games/min on depth 8, depth 12 will be ~40 games/min → ~4 hours for 10000
     ./target/release/togyzkumalaq-engine datagen 10000 12 16 $DATA_DIR/gen7 2>&1 | tee -a $LOG
-    cd /home/nurlykhan/9QumalaqV2/mcts
+    cd /home/nurlykhan/9QumalaqV2
 fi
 
 log "=== Data ready: $(du -sh $DATA_DIR | cut -f1) ==="
@@ -45,14 +45,14 @@ python3 -u scripts/train_distillation.py \
     --data "$DATA_DIR/*.bin" \
     --output $CKPT_DIR/distilled.pt \
     --model-size large2m \
-    --init-checkpoint checkpoints_v3/supervised_fresh.pt \
+    --init-checkpoint /home/nurlykhan/9QumalaqV2/research/runs/_legacy/checkpoints_v3/supervised_fresh.pt \
     --epochs 40 \
     --batch-size 1024 \
     --lr 0.0005 \
     2>&1 | tee -a $LOG
 
 log "=== Phase 3: Export ONNX and evaluate ==="
-python3 scripts/export_onnx.py $CKPT_DIR/distilled.pt \
+python3 ../data/export_onnx.py $CKPT_DIR/distilled.pt \
     -o $CKPT_DIR/distilled.onnx \
     --model-size large2m 2>&1 | tee -a $LOG
 

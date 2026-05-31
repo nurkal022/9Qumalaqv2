@@ -5,7 +5,7 @@
 
 cd /home/nurlykhan/9QumalaqV2/engine
 
-ENGINE=/home/nurlykhan/9QumalaqV2/engine/target/release/togyzkumalaq-engine-baseline
+ENGINE=/home/nurlykhan/9QumalaqV2/target/release/togyzkumalaq-engine-baseline
 
 if [ ! -x "$ENGINE" ]; then
     echo "Engine binary missing: $ENGINE"

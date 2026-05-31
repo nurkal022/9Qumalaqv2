@@ -6,7 +6,7 @@
 # Note: full search (eval-sims=200) currently regresses (value head unreliable),
 # so this serve mode uses Gumbel 1-ply selection. Strength is policy-only.
 
-cd /home/nurlykhan/9QumalaqV2/mcts
+cd /home/nurlykhan/9QumalaqV2
 
 NVIDIA_LIBS=/home/nurlykhan/.local/lib/python3.12/site-packages/nvidia
 export ORT_DYLIB_PATH=/home/nurlykhan/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4
@@ -15,7 +15,7 @@ export LD_LIBRARY_PATH=$NVIDIA_LIBS/cublas/lib:$NVIDIA_LIBS/cuda_runtime/lib:$NV
 MODEL=eval_onnx_final/night_best.onnx
 if [ ! -f "$MODEL" ]; then
     echo "Model missing: $MODEL"
-    echo "Run: python3 scripts/export_onnx.py checkpoints_night/best.pt -o $MODEL --model-size large2m"
+    echo "Run: python3 ../data/export_onnx.py /home/nurlykhan/9QumalaqV2/research/runs/_legacy/checkpoints_night/best.pt -o $MODEL --model-size large2m"
     exit 1
 fi
 

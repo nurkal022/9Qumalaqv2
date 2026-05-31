@@ -8,7 +8,7 @@ Games are logged as JSONL on the server. Each game has:
 - human_color: which side the human played
 
 Usage:
-  python scripts/collect_master_games.py --output master_games.bin
+  python ../data/collect_master_games.py --output master_games.bin
 """
 
 import sys, os, json, argparse, struct

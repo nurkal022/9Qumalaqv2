@@ -1,11 +1,11 @@
 #!/bin/bash
 # Night training run — continuous selfplay + train for ~3.5h.
-# Args: $1 = init checkpoint .pt path (e.g. checkpoints_v3/iter_500.pt)
+# Args: $1 = init checkpoint .pt path (e.g. /home/nurlykhan/9QumalaqV2/research/runs/_legacy/checkpoints_v3/iter_500.pt)
 #       $2 = duration seconds (default 12600 = 3.5h)
 set -u
-cd /home/nurlykhan/9QumalaqV2/mcts
+cd /home/nurlykhan/9QumalaqV2
 
-INIT_CKPT="${1:-checkpoints_v3/iter_500.pt}"
+INIT_CKPT="${1:-/home/nurlykhan/9QumalaqV2/research/runs/_legacy/checkpoints_v3/iter_500.pt}"
 DURATION="${2:-12600}"
 
 NVIDIA_LIBS=/home/nurlykhan/.local/lib/python3.12/site-packages/nvidia
@@ -21,7 +21,7 @@ cp -f "$INIT_CKPT" $CKPT_DIR/latest.pt
 echo "[$(date)] Seeded $CKPT_DIR/latest.pt from $INIT_CKPT" >> $LOG
 
 # Run with timeout
-timeout $DURATION python3 -u scripts/train_loop.py \
+timeout $DURATION python3 -u train_loop.py \
     --iterations 5000 \
     --games 100 \
     --sims 200 \
