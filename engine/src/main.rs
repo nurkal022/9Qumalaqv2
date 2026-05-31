@@ -703,37 +703,6 @@ fn run_match_nnue(weights_a: &str, weights_b: &str, num_games: u32, time_ms: u64
     }
 }
 
-/// Parse position string: "w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side"
-fn parse_position(pos: &str) -> Result<Board, String> {
-    let parts: Vec<&str> = pos.split('/').collect();
-    if parts.len() != 5 {
-        return Err(format!("Expected 5 parts separated by '/', got {}", parts.len()));
-    }
-
-    let white_pits: Vec<u8> = parts[0].split(',').map(|s| s.parse().unwrap_or(0)).collect();
-    let black_pits: Vec<u8> = parts[1].split(',').map(|s| s.parse().unwrap_or(0)).collect();
-    let kazans: Vec<u8> = parts[2].split(',').map(|s| s.parse().unwrap_or(0)).collect();
-    let tuzdyks: Vec<i8> = parts[3].split(',').map(|s| s.parse().unwrap_or(-1)).collect();
-    let side: u8 = parts[4].parse().unwrap_or(0);
-
-    if white_pits.len() != 9 || black_pits.len() != 9 || kazans.len() != 2 || tuzdyks.len() != 2 {
-        return Err("Invalid array lengths".into());
-    }
-
-    let mut board = Board::new();
-    for i in 0..9 {
-        board.pits[0][i] = white_pits[i];
-        board.pits[1][i] = black_pits[i];
-    }
-    board.kazan[0] = kazans[0];
-    board.kazan[1] = kazans[1];
-    board.tuzdyk[0] = tuzdyks[0];
-    board.tuzdyk[1] = tuzdyks[1];
-    board.side_to_move = if side == 0 { Side::White } else { Side::Black };
-
-    Ok(board)
-}
-
 /// Persistent stdin/stdout protocol for web server integration.
 /// Keeps the Searcher alive between moves so TT and game history persist.
 fn run_serve() {
@@ -784,7 +753,7 @@ fn run_serve() {
             }
             "position" => {
                 if parts.len() >= 2 {
-                    match parse_position(parts[1]) {
+                    match board::parse_position(parts[1]) {
                         Ok(board) => {
                             let hash = searcher.compute_hash(&board);
                             searcher.push_game_position(hash);
@@ -829,7 +798,7 @@ fn run_serve() {
                     }
                 }
 
-                match parse_position(pos_str) {
+                match board::parse_position(pos_str) {
                     Ok(board) => {
                         if board.is_terminal() {
                             let result = board.game_result();
@@ -898,7 +867,7 @@ fn run_serve() {
 }
 
 fn run_analyze(pos: &str, time_ms: u64) {
-    let board = match parse_position(pos) {
+    let board = match board::parse_position(pos) {
         Ok(b) => b,
         Err(e) => {
             println!("{{\"error\":\"{}\"}}", e);

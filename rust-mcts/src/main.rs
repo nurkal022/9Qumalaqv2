@@ -280,7 +280,7 @@ fn run_serve(args: &Args) {
                 }
 
                 // Parse position
-                match parse_position(pos_str) {
+                match board::parse_position(pos_str) {
                     Ok(board) => {
                         if board.is_terminal() {
                             let result_str = match board.game_result() {
@@ -315,35 +315,6 @@ fn run_serve(args: &Args) {
             _ => {}
         }
     }
-}
-
-/// Parse position string: "w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side"
-fn parse_position(pos: &str) -> Result<board::Board, String> {
-    let parts: Vec<&str> = pos.split('/').collect();
-    if parts.len() != 5 {
-        return Err(format!("Expected 5 parts, got {}", parts.len()));
-    }
-    let white_pits: Vec<u8> = parts[0].split(',').map(|s| s.parse().unwrap_or(0)).collect();
-    let black_pits: Vec<u8> = parts[1].split(',').map(|s| s.parse().unwrap_or(0)).collect();
-    let kazans: Vec<u8> = parts[2].split(',').map(|s| s.parse().unwrap_or(0)).collect();
-    let tuzdyks: Vec<i8> = parts[3].split(',').map(|s| s.parse().unwrap_or(-1)).collect();
-    let side: u8 = parts[4].parse().unwrap_or(0);
-
-    if white_pits.len() != 9 || black_pits.len() != 9 {
-        return Err("Invalid pit array".into());
-    }
-
-    let mut b = board::Board::new();
-    for i in 0..9 {
-        b.pits[0][i] = white_pits[i];
-        b.pits[1][i] = black_pits[i];
-    }
-    b.kazan[0] = kazans.get(0).copied().unwrap_or(0);
-    b.kazan[1] = kazans.get(1).copied().unwrap_or(0);
-    b.tuzdyk[0] = tuzdyks.get(0).copied().unwrap_or(-1);
-    b.tuzdyk[1] = tuzdyks.get(1).copied().unwrap_or(-1);
-    b.side_to_move = if side == 0 { board::Side::White } else { board::Side::Black };
-    Ok(b)
 }
 
 /// League mode: mixed selfplay + engine games, two output files
