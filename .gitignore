@@ -136,3 +136,6 @@ datasets/**
 research/runs/**
 !research/runs/**/config.yaml
 !research/runs/**/summary.md
+
+# Large endgame tablebase shipped beside the engine (deployed separately, not tracked)
+models/engine/egtb.bin

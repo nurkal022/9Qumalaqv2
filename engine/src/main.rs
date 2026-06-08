@@ -20,8 +20,23 @@ const NNUE_PATH: &str = "nnue_weights.bin";
 const BOOK_PATH: &str = "opening_book.txt";
 const EGTB_PATH: &str = "egtb.bin";
 
+/// Resolve an asset file: prefer next to the executable (so a deployed binary finds
+/// its NNUE/EGTB/book regardless of CWD), else fall back to the CWD-relative name
+/// (preserves the engine/-dir and ab_match workflows).
+fn resolve_asset(name: &str) -> String {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join(name);
+            if p.exists() {
+                return p.to_string_lossy().into_owned();
+            }
+        }
+    }
+    name.to_string()
+}
+
 fn load_book() -> Option<OpeningBook> {
-    OpeningBook::load(BOOK_PATH)
+    OpeningBook::load(&resolve_asset(BOOK_PATH))
 }
 
 /// Simple xor-shift PRNG seeded from system time. We don't need crypto-grade
@@ -98,8 +113,9 @@ fn pick_creative(scored: &[(usize, i32)], level: u32, best_score: i32) -> usize 
 }
 
 fn load_egtb() -> Option<Arc<egtb::EndgameTablebase>> {
-    if std::path::Path::new(EGTB_PATH).exists() {
-        match egtb::EndgameTablebase::load(EGTB_PATH) {
+    let egtb_path = resolve_asset(EGTB_PATH);
+    if std::path::Path::new(&egtb_path).exists() {
+        match egtb::EndgameTablebase::load(&egtb_path) {
             Ok(tb) => {
                 eprintln!("EGTB loaded: {} entries, max {} stones", tb.len(), tb.max_stones);
                 Some(Arc::new(tb))
@@ -115,10 +131,11 @@ fn load_egtb() -> Option<Arc<egtb::EndgameTablebase>> {
 }
 
 fn load_nnue() -> Option<NnueNetwork> {
-    if std::path::Path::new(NNUE_PATH).exists() {
-        match NnueNetwork::load(NNUE_PATH) {
+    let nnue_path = resolve_asset(NNUE_PATH);
+    if std::path::Path::new(&nnue_path).exists() {
+        match NnueNetwork::load(&nnue_path) {
             Ok(net) => {
-                eprintln!("NNUE loaded from {}", NNUE_PATH);
+                eprintln!("NNUE loaded from {}", nnue_path);
                 Some(net)
             }
             Err(e) => {
