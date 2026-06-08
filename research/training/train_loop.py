@@ -30,7 +30,11 @@ from train_alphazero import load_replay_buffer, export_onnx
 
 # ── Config ──────────────────────────────────────────────────
 
-RUST_BINARY = os.path.join(os.path.dirname(__file__), '..', 'target', 'release', 'mcts')
+# Cargo workspace builds all crates to the ROOT target/ (not per-crate research/target).
+# ENGINE_BINARY stays under engine/target/release so the mcts binary resolves its
+# resource_dir (= engine_dir/../.. = engine/) for nnue/egtb/book; that path is a
+# symlink to the root-built binary (engine/target/release/togyzkumalaq-engine).
+RUST_BINARY = os.path.join(os.path.dirname(__file__), '..', '..', 'target', 'release', 'mcts')
 ENGINE_BINARY = os.path.join(os.path.dirname(__file__), '..', '..', 'engine', 'target', 'release', 'togyzkumalaq-engine')
 
 NVIDIA_LIBS = os.path.expanduser('~/.local/lib/python3.12/site-packages/nvidia')

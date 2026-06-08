@@ -36,13 +36,13 @@ const NULL_MOVE_R: i32 = 2;
 const LMR_THRESHOLD: usize = 2; // reduce moves after this many (0-indexed)
 
 /// Aspiration window initial delta (calibrated for NNUE/64 scale)
-const ASP_DELTA: i32 = 35;
+const ASP_DELTA: i32 = 20;
 
 /// Reverse Futility Pruning margins per depth (calibrated for NNUE/64 scale)
 const RFP_MARGIN: i32 = 70;
 
-// Singular Extension disabled — causes node explosion in togyz kumalak
-// (branching factor 5-8 means SE searches 4-7 extra subtrees per TT move)
+// Singular Extensions ENABLED (2026-06-08): branching is <=9 and shrinks to 2-4 in
+// the endgame, so the verification search is cheap. A/B SE-on vs SE-off = +55 Elo.
 
 /// Late Move Pruning: max moves to try at shallow depths
 /// lmp_table[depth] = max quiet moves before pruning
@@ -86,6 +86,8 @@ pub struct Searcher {
     prev_move: [i8; MAX_DEPTH as usize],
     /// Static eval at each ply (for "improving" heuristic)
     static_evals: [i32; MAX_DEPTH as usize],
+    /// Move excluded from search at the current node (singular-extension verification); -1 = none
+    excluded_move: i8,
 }
 
 impl Searcher {
@@ -111,6 +113,7 @@ impl Searcher {
             search_path: [0; MAX_DEPTH as usize],
             prev_move: [-1; MAX_DEPTH as usize],
             static_evals: [0; MAX_DEPTH as usize],
+            excluded_move: -1,
         }
     }
 
@@ -137,6 +140,7 @@ impl Searcher {
             search_path: [0; MAX_DEPTH as usize],
             prev_move: [-1; MAX_DEPTH as usize],
             static_evals: [0; MAX_DEPTH as usize],
+            excluded_move: -1,
         }
     }
 
@@ -182,69 +186,33 @@ impl Searcher {
             if total <= 60 {
                 let my_active = board.pits[me].iter().filter(|&&x| x > 0).count() as i32;
                 let opp_active = board.pits[opp].iter().filter(|&&x| x > 0).count() as i32;
-                let my_p = my_stones as i32;
-                let opp_p = opp_stones as i32;
 
-                // Phase-based mobility multiplier (data-tuned from 360K PlayOK games):
-                //   ≤60 stones: ×3 — entering tempo (median ply 47, 92% of pro games)
-                //   ≤40 stones: ×6 — main tempo phase (61% of pro games)
-                //   ≤25 stones: ×10 — critical zugzwang risk
-                let mob_mult = if total <= 25 { 10 }
-                               else if total <= 40 { 6 }
-                               else { 3 };
-                let mobility_bonus = (my_active - opp_active) * 8 * mob_mult;
+                // Scale corrections smoothly: total=60→1, total=30→2, total=15→3, total=5→4
+                let scale = ((65 - total as i32).max(1)) / 15;
+                let scale = scale.clamp(1, 4);
 
-                // Pit-asymmetry bonus: stones on MY pits become mine via end-of-game sweep.
-                // 21% of pro games end with kazan spread ≤5 — decided by who emptied first.
-                let asym_weight = if total <= 25 { 12 }
-                                  else if total <= 40 { 8 }
-                                  else { 4 };
-                let asymmetry_bonus = (my_p - opp_p) * asym_weight;
+                // Mobility: critical endgame factor (PlayOK: mobility weight = 124 in HCE)
+                let mobility_bonus = (my_active - opp_active) * 3 * scale;
 
-                // Move-deficit penalty: about to lose tempo race
-                let mob_deficit = if my_active <= 3 && opp_active > my_active {
-                    let d = opp_active - my_active;
-                    -d * d * 80
-                } else if opp_active <= 3 && my_active > opp_active {
-                    let a = my_active - opp_active;
-                    a * a * 80
+                // Starvation: quadratic pressure when opponent running low
+                let starvation = if opp_stones <= 20 {
+                    let pressure = 21 - opp_stones as i32;
+                    (pressure * pressure * scale) / 8
                 } else { 0 };
 
-                // Zugzwang: about to run out of moves entirely
-                let zugzwang = if my_active <= 1 && total > 5 {
-                    -600
-                } else if opp_active <= 1 && total > 5 {
-                    600
-                } else { 0 };
-
-                // Starvation pressure — two-stage:
-                //   linear pre-warning at ≤18 stones on a side
-                //   quadratic explosion at ≤9 (close to terminal)
-                let starv_opp = if opp_p <= 18 {
-                    let linear = (18 - opp_p) * 6;
-                    let quad = if opp_p <= 9 { let p = 10 - opp_p; p * p * 15 } else { 0 };
-                    linear + quad
-                } else { 0 };
-                let starv_me = if my_p <= 18 {
-                    let linear = (18 - my_p) * 6;
-                    let quad = if my_p <= 9 { let p = 10 - my_p; p * p * 15 } else { 0 };
-                    linear + quad
-                } else { 0 };
-
-                // Finishing: when winning material and opponent emptying — close it out
+                // Finishing: huge bonus to close out won games
                 let my_kazan = board.kazan[me] as i32;
                 let opp_kazan = board.kazan[opp] as i32;
-                let finish_bonus = if my_kazan > opp_kazan + 5 && opp_p <= 8 {
-                    (9 - opp_p) * 100
+                let finish_bonus = if my_kazan > opp_kazan + 5 && opp_stones <= 8 {
+                    (9 - opp_stones as i32) * 8 * scale
                 } else { 0 };
 
-                // Kazan proximity to win threshold (82)
+                // Kazan proximity: accelerate when close to 82
                 let kazan_bonus = if my_kazan >= 65 {
-                    (my_kazan - 65) * 6
+                    (my_kazan - 65) * 2 * scale
                 } else { 0 };
 
-                base + mobility_bonus + asymmetry_bonus + mob_deficit + zugzwang
-                     + starv_opp - starv_me + finish_bonus + kazan_bonus
+                base + mobility_bonus + starvation + finish_bonus + kazan_bonus
             } else {
                 base
             }
@@ -610,6 +578,12 @@ impl Searcher {
 
         self.nodes += 1;
 
+        // Singular-extension exclusion applies to THIS node only — consume the
+        // flag immediately so the recursive verification search's children (and
+        // all other recursion) behave normally.
+        let excluded = self.excluded_move;
+        self.excluded_move = -1;
+
         // Terminal check
         if let Some(result) = board.game_result() {
             return match result {
@@ -671,10 +645,18 @@ impl Searcher {
         }
 
         let mut tt_move: i8 = -1;
+        let mut tt_score = 0i32;
+        let mut tt_depth = -1i32;
+        let mut tt_is_lower = false;
 
         if let Some(entry) = self.tt.probe(hash) {
             tt_move = entry.best_move;
-            if entry.depth >= depth && !is_pv {
+            tt_score = entry.score;
+            tt_depth = entry.depth;
+            tt_is_lower = matches!(entry.flag, TTFlag::LowerBound | TTFlag::Exact);
+            // During a singular-verification search the TT entry reflects the
+            // excluded move, so its cutoff would be unsound — skip it.
+            if entry.depth >= depth && !is_pv && excluded < 0 {
                 match entry.flag {
                     TTFlag::Exact => return entry.score,
                     TTFlag::LowerBound => {
@@ -812,6 +794,10 @@ impl Searcher {
 
         for i in 0..num_moves {
             let m = moves[i];
+            // Skip the move excluded by a singular-extension verification search.
+            if m as i8 == excluded {
+                continue;
+            }
             let is_capture = self.is_capture_move(board, m);
             let creates_tuzdyk = self.move_creates_tuzdyk(board, m);
             let is_tt_move = tt_move >= 0 && m == tt_move as usize;
@@ -844,7 +830,35 @@ impl Searcher {
                 extension += 1;
             }
 
-            // Singular Extension removed (see comment above)
+            // === SINGULAR EXTENSION ===
+            // If the TT move looks forced (much better than every alternative),
+            // search it one ply deeper. Branching is <=9 and shrinks to 2-4 in the
+            // endgame, so the reduced-depth verification search is cheap, and the
+            // game is full of only-good moves (forced captures, the single tuzdyk
+            // set/avoid, zugzwang escapes) that SE turns into extra depth.
+            if is_tt_move
+                && excluded < 0
+                && extension == 0
+                && depth >= 6
+                && tt_depth >= depth - 3
+                && tt_is_lower
+                && tt_score.abs() < EVAL_MATE - 256
+            {
+                let singular_beta = tt_score - 2 * depth;
+                self.excluded_move = m as i8;
+                let s = self.alpha_beta(board, (depth - 1) / 2, singular_beta - 1, singular_beta, ply);
+                self.excluded_move = -1;
+                // The verification search reuses this ply and clobbers prev_move[ply];
+                // restore it so this move's children get the right countermove context.
+                self.prev_move[ply as usize] = m as i8;
+                if self.stopped {
+                    return 0;
+                }
+                // No alternative reached singular_beta -> the TT move is singular.
+                if s < singular_beta {
+                    extension += 1;
+                }
+            }
 
             let effective_depth = depth - 1 + endgame_ext + extension;
 
@@ -957,8 +971,11 @@ impl Searcher {
             }
         }
 
-        // Store in TT
-        self.tt.store(hash, depth, best_score, flag, best_move);
+        // Store in TT (but not during a singular-verification search, whose result
+        // is biased by the excluded move and would corrupt the entry).
+        if excluded < 0 {
+            self.tt.store(hash, depth, best_score, flag, best_move);
+        }
 
         best_score
     }

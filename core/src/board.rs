@@ -248,13 +248,16 @@ impl Board {
         let black_empty = self.pits[1].iter().all(|&x| x == 0);
 
         if white_empty || black_empty {
-            if self.kazan[0] > self.kazan[1] {
-                return Some(GameResult::Win(Side::White));
-            } else if self.kazan[1] > self.kazan[0] {
-                return Some(GameResult::Win(Side::Black));
-            } else {
-                return Some(GameResult::Draw);
-            }
+            // End-of-game sweep: each side's remaining board stones go into its
+            // own kazan before comparing (the empty side contributes 0). Equivalent
+            // to "the player who still has stones takes the rest of the board".
+            let kw = self.kazan[0] as u16 + self.stones_on_side(Side::White);
+            let kb = self.kazan[1] as u16 + self.stones_on_side(Side::Black);
+            return Some(match kw.cmp(&kb) {
+                std::cmp::Ordering::Greater => GameResult::Win(Side::White),
+                std::cmp::Ordering::Less => GameResult::Win(Side::Black),
+                std::cmp::Ordering::Equal => GameResult::Draw,
+            });
         }
 
         None
@@ -453,6 +456,32 @@ mod tests {
         let mut b = Board::new();
         b.kazan[0] = 82;
         assert_eq!(b.game_result(), Some(GameResult::Win(Side::White)));
+    }
+
+    #[test]
+    fn test_endgame_sweep_breaks_kazan_tie() {
+        // When a side empties, each player's remaining board stones are swept
+        // into their OWN kazan before deciding the winner. Kazans tied at 71-71
+        // but Black still holds 20 on board (total 71+71+20=162) -> Black 91 > 71.
+        // The buggy raw-kazan compare returns Draw; correct result is Win(Black).
+        let mut b = Board::new();
+        b.pits[0] = [0; 9];
+        b.pits[1] = [4, 4, 4, 4, 4, 0, 0, 0, 0]; // 20 stones
+        b.kazan = [71, 71];
+        assert_eq!(b.game_result(), Some(GameResult::Win(Side::Black)));
+    }
+
+    #[test]
+    fn test_endgame_sweep_conserves_162() {
+        // At a board-empty terminal, kazans + swept board stones sum to 162.
+        let mut b = Board::new();
+        b.pits[0] = [0; 9];
+        b.pits[1] = [3, 0, 5, 0, 2, 0, 1, 0, 0]; // 11 stones
+        b.kazan = [75, 76];
+        let swept_w = b.kazan[0] as u16 + b.stones_on_side(Side::White);
+        let swept_b = b.kazan[1] as u16 + b.stones_on_side(Side::Black);
+        assert_eq!(swept_w + swept_b, 162);
+        assert_eq!(b.game_result(), Some(GameResult::Win(Side::Black))); // 87 > 75
     }
 
     #[test]

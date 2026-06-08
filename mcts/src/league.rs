@@ -161,10 +161,10 @@ pub fn play_engine_game(
         move_count += 1;
     }
 
-    // Game outcome: score-proportional values
+    // Game outcome: score-proportional values (swept final totals — see self_play.rs).
     let result = board.game_result();
-    let white_kazan = board.kazan[0] as f32;
-    let black_kazan = board.kazan[1] as f32;
+    let white_kazan = board.kazan[0] as f32 + board.stones_on_side(Side::White) as f32;
+    let black_kazan = board.kazan[1] as f32 + board.stones_on_side(Side::Black) as f32;
     let model_side = if model_is_white { Side::White } else { Side::Black };
 
     let mut records = Vec::with_capacity(pending.len());

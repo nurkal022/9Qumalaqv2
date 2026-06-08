@@ -69,10 +69,14 @@ pub fn play_one_game(
         move_number += 1;
     }
 
-    // Game outcome: score-proportional values
+    // Game outcome: score-proportional values.
+    // Use SWEPT final totals (kazan + own remaining board stones), consistent with
+    // the end-game sweep rule that game_result() now uses to decide the winner.
+    // (Previously used raw kazans, which mis-scaled the magnitude on empty-side
+    // terminals — the same bug class as the wrong-winner label.)
     let result = board.game_result();
-    let white_kazan = board.kazan[0] as f32;
-    let black_kazan = board.kazan[1] as f32;
+    let white_kazan = board.kazan[0] as f32 + board.stones_on_side(crate::board::Side::White) as f32;
+    let black_kazan = board.kazan[1] as f32 + board.stones_on_side(crate::board::Side::Black) as f32;
 
     let mut records = Vec::with_capacity(pending.len());
     for p in pending {
