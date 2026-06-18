@@ -74,9 +74,13 @@ def rust_league(model_onnx, sp_output, eng_output,
     ]
 
     t0 = time.time()
+    # NOTE: must pass env=env so the league child gets ORT_DYLIB_PATH + the CUDA
+    # LD_LIBRARY_PATH. Without it the child inherits the parent env; if that lacks
+    # the nvidia lib paths, ORT's CUDA provider deadlocks during init (all worker
+    # threads hang on a futex, never reaching the GPU). The --eval call already does this.
     result = subprocess.run(cmd, capture_output=True, text=True,
                            cwd=os.path.dirname(os.path.abspath(RUST_BINARY)),
-                           timeout=600)
+                           env=env, timeout=600)
     elapsed = time.time() - t0
 
     if result.returncode != 0:
@@ -373,8 +377,11 @@ def main():
     parser.add_argument("--eval-interval", type=int, default=10)
     parser.add_argument("--eval-pairs", type=int, default=20, help="Color-paired eval games (total=2x)")
     parser.add_argument("--eval-sims", type=int, default=800, help="Sims for eval (higher than selfplay)")
+    parser.add_argument("--gate-margin", type=float, default=0.0, help="Candidate must beat best by >= this pp to be promoted")
     parser.add_argument("--max-buffer", type=int, default=500000)
-    parser.add_argument("--expert-ratio", type=float, default=0.2, help="Expert data mixing ratio")
+    parser.add_argument("--expert-ratio", type=float, default=0.2, help="Expert data mixing ratio (starting/max)")
+    parser.add_argument("--expert-decay", type=float, default=1.0, help="Per-iter multiplier on expert ratio (1.0=off)")
+    parser.add_argument("--expert-min", type=float, default=0.0, help="Floor for the decayed expert ratio")
     parser.add_argument("--checkpoint-dir", default="checkpoints_v3")
     parser.add_argument("--log", default="/tmp/train_loop_v3.log")
     args = parser.parse_args()
@@ -390,7 +397,7 @@ def main():
         log_file.write(line + '\n')
         log_file.flush()
 
-    log(f"=== Training Loop v3 (No Gating) ===")
+    log(f"=== Training Loop v4 (Keep-Best Gating @ {args.eval_sims} sims) ===")
     log(f"Config: {vars(args)}")
 
     model = create_model(args.model_size, device=device)
@@ -437,7 +444,20 @@ def main():
     log(f"Initial ONNX exported")
 
     total_positions = 0
+    # Seed the gate with the initial (bootstrap) net's strength, so candidates must
+    # actually beat it before they replace the selfplay net.
     best_wr = 0.0
+    try:
+        log(f"  Gate seed: initial net vs baseline ({args.eval_pairs} pairs, {args.eval_sims} sims)...")
+        _w, _d, _l, best_wr, *_ = eval_vs_engine_rust(
+            onnx_path, num_pairs=args.eval_pairs, eval_sims=args.eval_sims, engine_time=200,
+        )
+        log(f"  Initial best_wr = {best_wr:.1f}%")
+        torch.save({'model_state_dict': model.state_dict(), 'iteration': start_iter, 'best_wr': best_wr},
+                   os.path.join(args.checkpoint_dir, 'best.pt'))
+    except Exception as e:
+        best_wr = 0.0
+        log(f"  Gate seed eval failed ({e}); best_wr=0")
 
     for iteration in range(start_iter, args.iterations):
         iter_start = time.time()
@@ -501,34 +521,33 @@ def main():
                 with open(accum_eng_path, 'wb') as f:
                     f.write(data)
 
-        # Step 2: Train with engine data oversampling + expert mixing
+        # Step 2: Train with engine data oversampling + expert mixing.
+        # Expert-anchor schedule: start high (expert_ratio) and DECAY toward expert_min
+        # as the net matures, so a weak early net stays anchored to expert play while a
+        # strong later net is freed to learn from its own (better) self-play.
+        eff_expert = max(args.expert_min, args.expert_ratio * (args.expert_decay ** (iteration - start_iter)))
         lr_now = optimizer.param_groups[0]['lr']
         eng_recs = os.path.getsize(accum_eng_path) // RECORD_SIZE if os.path.exists(accum_eng_path) else 0
-        log(f"  Training on {accum_records}+{eng_recs}eng positions ({args.train_epochs} epochs, lr={lr_now:.6f})...")
+        log(f"  Training on {accum_records}+{eng_recs}eng positions ({args.train_epochs} epochs, lr={lr_now:.6f}, expert={eff_expert:.2f})...")
         loss, p_loss, v_loss, n_train = train_on_buffer(
             model, optimizer, accum_buffer_path,
             engine_buffer_path=accum_eng_path, engine_weight=3.0,
-            expert_data=expert_data, expert_ratio=args.expert_ratio,
+            expert_data=expert_data, expert_ratio=eff_expert,
             epochs=args.train_epochs, batch_size=512, device=device,
             max_buffer=args.max_buffer,
         )
         scheduler.step()
         log(f"  Loss: {loss:.4f} (p={p_loss:.4f}, v={v_loss:.4f})")
 
-        # Step 3: Export LATEST model for next selfplay (no gating!)
-        export_onnx(model, onnx_path)
+        # Step 3: GATING — do NOT blindly export latest for selfplay. Selfplay keeps
+        # using the current BEST net (onnx_path) until a candidate proves stronger
+        # (Step 5). This fixes the overnight degradation (the old loop exported latest
+        # every iter = no gating = downward spiral). Export a transient candidate for
+        # the gate eval only.
+        cand_onnx = os.path.join(args.checkpoint_dir, 'candidate.onnx')
+        export_onnx(model, cand_onnx)
 
-        # Step 4: Save checkpoint
-        if (iteration + 1) % 5 == 0:
-            cp_path = os.path.join(args.checkpoint_dir, f'iter_{iteration+1}.pt')
-            torch.save({
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'iteration': iteration + 1,
-                'total_positions': total_positions,
-            }, cp_path)
-            log(f"  Checkpoint: {cp_path}")
-
+        # Step 4: Save latest.pt for resume only (DISK SAFETY: no accumulating iter_N.pt)
         torch.save({
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
@@ -536,29 +555,38 @@ def main():
             'total_positions': total_positions,
         }, os.path.join(args.checkpoint_dir, 'latest.pt'))
 
-        # Step 5: Color-paired eval via Rust 1-ply (monitoring only, NOT gating)
+        # Step 5: GATED eval at full sims vs the fixed baseline. The candidate net is
+        # PROMOTED (becomes the selfplay net + saved best) ONLY if it is clearly at least
+        # as strong as the best so far. Rejecting regressions is what prevents collapse.
         if (iteration + 1) % args.eval_interval == 0:
-            log(f"  Eval vs Gen7 ({args.eval_pairs} pairs, Rust 1-ply)...")
+            log(f"  GATE: candidate vs baseline ({args.eval_pairs} pairs, {args.eval_sims} sims)...")
             model.eval()
             try:
                 w, d, l, wr, pw, pd, pl = eval_vs_engine_rust(
-                    onnx_path,
-                    num_pairs=args.eval_pairs, eval_sims=1,
+                    cand_onnx,
+                    num_pairs=args.eval_pairs, eval_sims=args.eval_sims,
                     engine_time=200,
                 )
-                log(f"  Eval: {w}W-{d}D-{l}L = {wr:.1f}% | Pairs: {pw}W-{pd}D-{pl}L")
+                log(f"  Candidate: {w}W-{d}D-{l}L = {wr:.1f}% | best so far {best_wr:.1f}%")
 
-                if wr > best_wr:
+                if wr >= best_wr + args.gate_margin:
                     best_wr = wr
-                    best_path = os.path.join(args.checkpoint_dir, 'best.pt')
+                    export_onnx(model, onnx_path)  # selfplay now uses this stronger net
                     torch.save({
                         'model_state_dict': model.state_dict(),
                         'iteration': iteration + 1,
                         'best_wr': best_wr,
-                    }, best_path)
-                    log(f"  New monitoring best: {wr:.1f}%")
+                    }, os.path.join(args.checkpoint_dir, 'best.pt'))
+                    log(f"  PROMOTED -> new best {wr:.1f}% (selfplay uses it now)")
+                else:
+                    log(f"  REJECTED ({wr:.1f}% < {best_wr:.1f}%+{args.gate_margin}) — selfplay keeps best")
             except Exception as e:
-                log(f"  Eval failed: {e}")
+                log(f"  Gate eval failed: {e}")
+            finally:
+                try:
+                    os.remove(cand_onnx)  # disk safety: candidate onnx is transient
+                except OSError:
+                    pass
 
         iter_time = time.time() - iter_start
         log(f"  Iter time: {iter_time:.0f}s | Total positions: {total_positions:,}")

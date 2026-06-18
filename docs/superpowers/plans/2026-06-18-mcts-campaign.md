@@ -18,11 +18,17 @@ Status: plan (the blocker bug is fixed; this is the path to strength)
 
 ## Engine/code prep (Phase 0 — ~half a day, do first)
 These are the prerequisites; without them the campaign will degrade again.
-1. **Add keep-best gating to the training loop** (new script or fix `train_loop.py`): after training iter N, play candidate vs current-best at 200 sims (e.g. 30-40 pairs); promote only if winrate ≥ 55%. Self-play always uses the current BEST net, never a regressed one. This single change is the most important.
-2. **Use full-MCTS self-play** (not Gumbel-1-ply) in the self-play data generation, sims 400-800. Verify the `mcts` binary's self-play path uses the (now-fixed) PUCT tree, or add a flag. Confirm Dirichlet noise + temperature are on for exploration.
-3. **Fix monitoring eval to 200 sims** (`train_loop.py:546` → pass `args.eval_sims`); add eval vs a FIXED reference (alpha-beta baseline) AND vs the previous best, both at 200 sims.
-4. **Expert-anchor schedule:** expert-ratio starts ~0.6, decays (e.g. ×0.97/iter) toward ~0.1 as the net's eval surpasses the alpha-beta baseline.
-5. Keep the value-target convention spread (sigmoid win-prob), and clamp magnitudes like the self-play code already does.
+**Status 2026-06-18: items 1, 3, 4 DONE + the league-hang bug fixed; smoke-test validated end-to-end. Item 2 (full-MCTS self-play) is the remaining engine change.**
+
+1. ✅ **DONE — keep-best gating in `train_loop.py`.** After each iter, the candidate net is evaluated vs the fixed alpha-beta baseline at `--eval-sims`; promoted (becomes the selfplay net `current.onnx` + saved `best.pt`) only if `wr >= best_wr + --gate-margin`. Self-play always uses the current BEST net, never a regressed one. Gate is seeded with the initial bootstrap net's strength before the loop. This is the single most important change (fixes the overnight downward spiral). Validated: PROMOTED/REJECTED logic fires correctly.
+2. ⬜ **TODO — full-MCTS self-play** (not Gumbel-1-ply), sims 400-800. Confirmed `self_play.rs` uses `gumbel::gumbel_search` (root + all children in ONE batch = genuine 1-ply; `self_play.rs:1`). The fixed PUCT tree `mcts::search` (`mcts.rs:124`) already returns `(visit_count_policy, root_val)` + Dirichlet noise + configurable sims — exactly the needed primitive. Wiring needed: plumb a `--selfplay-sims` (and a use-full-MCTS flag) through `main.rs::run_league` → `self_play::worker_loop` → `play_one_game`, build an `EvalContext` alongside the `GumbelContext`, and call `mcts::search` for the "full search" fraction (keep `fast_move` for the rest). Rebuild + retest. NOTE: gating (item 1) already prevents *degradation* with gumbel self-play; full-MCTS is what enables *improvement* (deeper policy targets → the AlphaZero virtuous cycle), so do it before the long campaign.
+3. ✅ **DONE — gate eval at full sims** (`--eval-sims`, default 800; pass e.g. 200). The old hardcoded `eval_sims=1` is gone; the gate is the eval vs the fixed alpha-beta baseline.
+4. ✅ **DONE — expert-anchor schedule.** `--expert-ratio` (start/max), `--expert-decay` (per-iter multiplier, 1.0=off), `--expert-min` (floor). `eff_expert = max(expert_min, expert_ratio * expert_decay**iter)`, logged each iter. Opt-in (defaults preserve old behavior).
+5. ✅ Value targets stay spread (sigmoid win-prob in the bootstrap convert; self-play uses swept score-proportional values, clamped 0.3–1.0 in `self_play.rs`).
+
+### Phase-0 fixes discovered while validating
+- **DISK SAFETY:** removed the accumulating `iter_N.pt` checkpoints (every 5 iters → ~1.1G over a night). Now only `latest.pt` (resume) + `best.pt` (gate winner) + transient `candidate.onnx` (removed after each gate). Smoke-test footprint stayed at ~44M. Critical given only ~2.2G free.
+- **LEAGUE-HANG BUG (latent, now fixed):** `rust_league` built `env` (ORT_DYLIB_PATH + CUDA `LD_LIBRARY_PATH`) but never passed `env=env` to `subprocess.run` — unlike the `--eval` call. When the parent shell lacked the nvidia lib paths, the league child's ORT CUDA provider deadlocked during init (all 18 worker threads stuck on a futex, never reaching the GPU). It only "worked overnight" because `tools/train_corrected.sh` exports those paths in the parent shell. Fixed by passing `env=env`. Now the league runs ~7s regardless of how the parent is launched.
 
 ## Phase 1 — Strong bootstrap (~1 day)
 Goal: a starting net where 200-sim search **clearly beats the alpha-beta baseline** (target ≥ 50%), so self-play has a strong base that won't regress.
