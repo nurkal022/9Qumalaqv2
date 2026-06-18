@@ -176,7 +176,8 @@ def load_expert_positions(max_examples=100000):
 def train_on_buffer(model, optimizer, buffer_path,
                     engine_buffer_path=None, engine_weight=3.0,
                     expert_data=None, expert_ratio=0.2,
-                    max_buffer=500000, epochs=2, batch_size=512, device='cuda'):
+                    max_buffer=500000, epochs=2, batch_size=512, device='cuda',
+                    value_weight=1.0):
     """Train model on replay buffer with engine data oversampling and expert mixing.
 
     Positions with all-zero policy (from fast playout cap) train value only.
@@ -242,7 +243,10 @@ def train_on_buffer(model, optimizer, buffer_path,
                 p_loss = torch.tensor(0.0, device=device)
 
             v_loss = F.mse_loss(v, v_target)
-            loss = p_loss + v_loss
+            # value_weight < 1 preserves a clean (engine-distilled) value head while
+            # the policy is refined — full weight on noisy ±1 outcome value targets
+            # corrupts the shared trunk and collapses the 200-sim search.
+            loss = p_loss + value_weight * v_loss
 
             optimizer.zero_grad()
             loss.backward()
@@ -383,6 +387,7 @@ def main():
     parser.add_argument("--eval-sims", type=int, default=800, help="Sims for eval (higher than selfplay)")
     parser.add_argument("--gate-margin", type=float, default=0.0, help="Candidate must beat best by >= this pp to be promoted")
     parser.add_argument("--selfplay-full-mcts", action="store_true", help="Self-play uses the full PUCT tree (sims-deep) instead of Gumbel 1-ply")
+    parser.add_argument("--value-weight", type=float, default=1.0, help="Weight on value loss (<1 preserves a clean value head vs noisy outcome labels)")
     parser.add_argument("--max-buffer", type=int, default=500000)
     parser.add_argument("--expert-ratio", type=float, default=0.2, help="Expert data mixing ratio (starting/max)")
     parser.add_argument("--expert-decay", type=float, default=1.0, help="Per-iter multiplier on expert ratio (1.0=off)")
@@ -540,7 +545,7 @@ def main():
             engine_buffer_path=accum_eng_path, engine_weight=3.0,
             expert_data=expert_data, expert_ratio=eff_expert,
             epochs=args.train_epochs, batch_size=512, device=device,
-            max_buffer=args.max_buffer,
+            max_buffer=args.max_buffer, value_weight=args.value_weight,
         )
         scheduler.step()
         log(f"  Loss: {loss:.4f} (p={p_loss:.4f}, v={v_loss:.4f})")
