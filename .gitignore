@@ -139,3 +139,11 @@ research/runs/**
 
 # Large endgame tablebase shipped beside the engine (deployed separately, not tracked)
 models/engine/egtb.bin
+
+# PlayOK bot data/venv (kept on disk, not in git)
+tools/playok/.venv/
+tools/playok/games/
+tools/playok/analysis/wins/
+tools/playok/analysis/losses/
+tools/playok/analysis/draws/
+tools/playok/__pycache__/

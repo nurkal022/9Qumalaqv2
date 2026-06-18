@@ -259,7 +259,10 @@ fn collect_one_leaf(
                 None => {
                     // No child yet — check terminal or queue for eval
                     if let Some(result) = board.game_result() {
-                        let val = terminal_value(result, board.side_to_move.opposite());
+                        // FIX: leaf perspective (board.side_to_move is already the leaf's
+                        // side after make_move) — must match the NN-leaf value convention,
+                        // else terminal values are inverted and deeper search plays worse.
+                        let val = terminal_value(result, board.side_to_move);
                         n.edges[idx].child = Some(Box::new(MctsNode::new_terminal(val)));
                         terminals.push((path, val as f64));
                     } else {
