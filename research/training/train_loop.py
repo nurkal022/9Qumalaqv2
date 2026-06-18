@@ -51,7 +51,8 @@ EXPERT_DIR = os.path.join(os.path.dirname(__file__), '../../game-pars/games')
 
 def rust_league(model_onnx, sp_output, eng_output,
                 selfplay_games=120, engine_games=40, sims=200,
-                workers=20, engine_workers=4, engine_time=200, batch_size=128):
+                workers=20, engine_workers=4, engine_time=200, batch_size=128,
+                full_mcts=False):
     """Run league mode: selfplay + engine games."""
     env = os.environ.copy()
     env['ORT_DYLIB_PATH'] = ORT_DYLIB
@@ -72,6 +73,9 @@ def rust_league(model_onnx, sp_output, eng_output,
         '--engine-output', os.path.abspath(eng_output),
         '--temp-threshold', '25',
     ]
+    if full_mcts:
+        # Full PUCT tree for self-play full-search moves (deeper policy targets)
+        cmd.append('--selfplay-full-mcts')
 
     t0 = time.time()
     # NOTE: must pass env=env so the league child gets ORT_DYLIB_PATH + the CUDA
@@ -378,6 +382,7 @@ def main():
     parser.add_argument("--eval-pairs", type=int, default=20, help="Color-paired eval games (total=2x)")
     parser.add_argument("--eval-sims", type=int, default=800, help="Sims for eval (higher than selfplay)")
     parser.add_argument("--gate-margin", type=float, default=0.0, help="Candidate must beat best by >= this pp to be promoted")
+    parser.add_argument("--selfplay-full-mcts", action="store_true", help="Self-play uses the full PUCT tree (sims-deep) instead of Gumbel 1-ply")
     parser.add_argument("--max-buffer", type=int, default=500000)
     parser.add_argument("--expert-ratio", type=float, default=0.2, help="Expert data mixing ratio (starting/max)")
     parser.add_argument("--expert-decay", type=float, default=1.0, help="Per-iter multiplier on expert ratio (1.0=off)")
@@ -472,6 +477,7 @@ def main():
             onnx_path, sp_buffer_path, eng_buffer_path,
             selfplay_games=selfplay_games, engine_games=engine_games,
             sims=args.sims, workers=args.workers, engine_workers=8, engine_time=100,
+            full_mcts=args.selfplay_full_mcts,
         )
         if not ok:
             log(f"  League failed, skipping")

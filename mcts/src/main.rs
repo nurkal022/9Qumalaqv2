@@ -85,6 +85,11 @@ struct Args {
     #[arg(long)]
     league: bool,
 
+    /// Self-play full-search moves use the full PUCT tree (mcts::search, `sims`-deep)
+    /// instead of Gumbel 1-ply. Deeper policy targets → AlphaZero improvement signal.
+    #[arg(long)]
+    selfplay_full_mcts: bool,
+
     /// Number of engine games (league mode)
     #[arg(long, default_value_t = 40)]
     engine_games: u32,
@@ -149,15 +154,17 @@ fn main() {
     let start = Instant::now();
     let temp_threshold = args.temp_threshold;
 
-    // Spawn worker threads (Gumbel selfplay)
+    // Spawn worker threads (selfplay)
+    let sp_cfg = make_selfplay_cfg(&args);
     let mut worker_handles = Vec::new();
     for w in 0..args.workers {
         let tx = eval_tx.clone();
         let res_tx = result_tx.clone();
         let n = games_per_worker + if w < remainder { 1 } else { 0 };
+        let cfg = sp_cfg.clone();
 
         let handle = thread::spawn(move || {
-            self_play::worker_loop(tx, res_tx, n, w, temp_threshold);
+            self_play::worker_loop(tx, res_tx, n, w, temp_threshold, cfg);
         });
         worker_handles.push(handle);
     }
@@ -318,6 +325,24 @@ fn run_serve(args: &Args) {
 }
 
 /// League mode: mixed selfplay + engine games, two output files
+/// Build the per-worker self-play search config from CLI args. When
+/// `--selfplay-full-mcts` is set, full-search moves run the full PUCT tree at
+/// `--sims` depth (deeper policy targets); otherwise Gumbel 1-ply (the default).
+fn make_selfplay_cfg(args: &Args) -> self_play::SelfPlayConfig {
+    self_play::SelfPlayConfig {
+        full_mcts: args.selfplay_full_mcts,
+        mcts: mcts::MctsConfig {
+            num_simulations: args.sims,
+            c_puct: args.cpuct,
+            dirichlet_alpha: args.dirichlet_alpha,
+            dirichlet_epsilon: 0.25,
+            temperature_threshold: args.temp_threshold,
+            virtual_batch: args.batch_size,
+        },
+        full_search_prob: 0.25,
+    }
+}
+
 fn run_league(args: &Args) {
     let selfplay_games = args.games;
     let engine_games = args.engine_games;
@@ -350,12 +375,14 @@ fn run_league(args: &Args) {
     let sp_remainder = selfplay_games % args.workers;
     let mut handles = Vec::new();
 
+    let sp_cfg = make_selfplay_cfg(args);
     for w in 0..args.workers {
         let tx = eval_tx.clone();
         let res_tx = sp_result_tx.clone();
         let n = sp_per_worker + if w < sp_remainder { 1 } else { 0 };
+        let cfg = sp_cfg.clone();
         handles.push(thread::spawn(move || {
-            self_play::worker_loop(tx, res_tx, n, w, temp_threshold);
+            self_play::worker_loop(tx, res_tx, n, w, temp_threshold, cfg);
         }));
     }
 
