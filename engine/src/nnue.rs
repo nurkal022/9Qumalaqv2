@@ -49,7 +49,7 @@ const MAX_HIDDEN1: usize = 512;
 const MAX_HIDDEN2: usize = 64;
 const MAX_HIDDEN3: usize = 64;
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct NnueNetwork {
     input_size: usize,
     hidden1: usize,
@@ -64,16 +64,34 @@ pub struct NnueNetwork {
     fc4_weight: Vec<i16>,  // [1 * hidden3], empty if no hidden3
     fc4_bias: Vec<i16>,
 
-    // --- v2 (NNU2) ---
-    v2: bool,
+    // --- v2/v3 (NNU2) shared ---
+    v2: bool,             // true for either NNU2 sub-format (f32 version 2 or i16 version 3)
+    nnu2_version: u16,    // 2 = f32 (load_nnu2_f32), 3 = i16 quantised (load_nnu2_i16); 0 if !v2
     acc_size: usize,
     buckets: usize,
+
+    // --- NNU2 version 2 (f32) ---
     v2_fc1_w: Vec<f32>,   // [num_features * acc_size]
     v2_fc1_b: Vec<f32>,   // [acc_size]
     v2_fc2_w: Vec<f32>,   // [buckets][hidden * acc_size] flattened
     v2_fc2_b: Vec<f32>,   // [buckets][hidden] flattened
     v2_fc3_w: Vec<f32>,   // [buckets][hidden] flattened
     v2_fc3_b: Vec<f32>,   // [buckets]
+
+    // --- NNU2 version 3 (i16, quantised) ---
+    // Scale factors: quantised = round(real * scale), real ~= quantised / scale.
+    // fc1_w and fc1_b share one scale because they are summed directly into the same
+    // i32 accumulator; each bucket's fc2/fc3 weights get their own scale because their
+    // magnitude varies a lot bucket to bucket (see NnueNetwork::pick_scale).
+    v3_fc1_w: Vec<i16>,   // [num_features * acc_size]
+    v3_fc1_b: Vec<i16>,   // [acc_size]
+    v3_fc2_w: Vec<i16>,   // [buckets][hidden * acc_size] flattened
+    v3_fc2_b: Vec<i16>,   // [buckets][hidden] flattened
+    v3_fc3_w: Vec<i16>,   // [buckets][hidden] flattened
+    v3_fc3_b: Vec<i16>,   // [buckets]
+    v3_scale_l1: f32,
+    v3_scale_fc2: Vec<f32>,  // [buckets]
+    v3_scale_fc3: Vec<f32>,  // [buckets]
 }
 
 impl NnueNetwork {
@@ -144,10 +162,7 @@ impl NnueNetwork {
                     input_size, hidden1, hidden2, hidden3,
                     fc1_weight, fc1_bias, fc2_weight, fc2_bias,
                     fc3_weight, fc3_bias, fc4_weight, fc4_bias,
-                    v2: false, acc_size: 0, buckets: 0,
-                    v2_fc1_w: Vec::new(), v2_fc1_b: Vec::new(),
-                    v2_fc2_w: Vec::new(), v2_fc2_b: Vec::new(),
-                    v2_fc3_w: Vec::new(), v2_fc3_b: Vec::new(),
+                    ..Default::default()
                 })
             } else {
                 // 3-layer with custom input_size: fc3 = hidden2→1
@@ -164,11 +179,8 @@ impl NnueNetwork {
                 Ok(NnueNetwork {
                     input_size, hidden1, hidden2, hidden3: 0,
                     fc1_weight, fc1_bias, fc2_weight, fc2_bias,
-                    fc3_weight, fc3_bias, fc4_weight: vec![], fc4_bias: vec![],
-                    v2: false, acc_size: 0, buckets: 0,
-                    v2_fc1_w: Vec::new(), v2_fc1_b: Vec::new(),
-                    v2_fc2_w: Vec::new(), v2_fc2_b: Vec::new(),
-                    v2_fc3_w: Vec::new(), v2_fc3_b: Vec::new(),
+                    fc3_weight, fc3_bias,
+                    ..Default::default()
                 })
             }
         } else {
@@ -195,15 +207,16 @@ impl NnueNetwork {
             Ok(NnueNetwork {
                 input_size, hidden1, hidden2, hidden3: 0,
                 fc1_weight, fc1_bias, fc2_weight, fc2_bias,
-                fc3_weight, fc3_bias, fc4_weight: vec![], fc4_bias: vec![],
-                v2: false, acc_size: 0, buckets: 0,
-                v2_fc1_w: Vec::new(), v2_fc1_b: Vec::new(),
-                v2_fc2_w: Vec::new(), v2_fc2_b: Vec::new(),
-                v2_fc3_w: Vec::new(), v2_fc3_b: Vec::new(),
+                fc3_weight, fc3_bias,
+                ..Default::default()
             })
         }
     }
 
+    /// Dispatch on the NNU2 `version` field (offset 4, right after the magic) to the
+    /// matching sub-format loader. The version field is the *only* thing that
+    /// disambiguates the two payload layouts below it — nothing else in the header is
+    /// reused with a different meaning between them.
     fn load_v2(data: &[u8]) -> Result<Self, String> {
         if data.len() < 16 {
             return Err(format!(
@@ -213,9 +226,17 @@ impl NnueNetwork {
         }
         let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]) as usize;
         let version = rd_u16(4);
-        if version != 2 {
-            return Err(format!("unsupported NNU2 version {version}"));
+        match version {
+            2 => Self::load_nnu2_f32(data),
+            3 => Self::load_nnu2_i16(data),
+            v => Err(format!("unsupported NNU2 version {v}")),
         }
+    }
+
+    /// NNU2 version 2: f32 weights everywhere. The original format; unchanged since
+    /// task 6 so it stays a valid comparison point for the version-3 (i16) path.
+    fn load_nnu2_f32(data: &[u8]) -> Result<Self, String> {
+        let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]) as usize;
         let num_features = rd_u16(6);
         let acc_size = rd_u16(8);
         let hidden = rd_u16(10);
@@ -253,13 +274,90 @@ impl NnueNetwork {
             input_size: num_features,
             hidden1: acc_size,
             hidden2: hidden,
-            hidden3: 0,
-            fc1_weight: Vec::new(), fc1_bias: Vec::new(),
-            fc2_weight: Vec::new(), fc2_bias: Vec::new(),
-            fc3_weight: Vec::new(), fc3_bias: Vec::new(),
-            fc4_weight: Vec::new(), fc4_bias: Vec::new(),
+            nnu2_version: 2,
             v2: true, acc_size, buckets,
             v2_fc1_w, v2_fc1_b, v2_fc2_w, v2_fc2_b, v2_fc3_w, v2_fc3_b,
+            ..Default::default()
+        })
+    }
+
+    /// NNU2 version 3: i16 weights with explicit per-tensor f32 scale factors
+    /// (quantised = round(real * scale)), for an integer forward pass (see
+    /// `logit_v3`). Header layout through `buckets`/pad is identical to version 2;
+    /// version 3 then inserts a scale-factor section before the (now i16) weight
+    /// payload. See `NnueNetwork::export_v3` for how the scales are chosen and the
+    /// exact byte layout, which this must mirror field-for-field.
+    fn load_nnu2_i16(data: &[u8]) -> Result<Self, String> {
+        let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]) as usize;
+        let num_features = rd_u16(6);
+        let acc_size = rd_u16(8);
+        let hidden = rd_u16(10);
+        let buckets = rd_u16(12);
+        if num_features != NUM_FEATURES_V2 {
+            return Err(format!("expected {NUM_FEATURES_V2} features, file has {num_features}"));
+        }
+        if acc_size != ACC_SIZE_V2 || hidden != HIDDEN_V2 {
+            return Err(format!(
+                "NNU2 v3 expects acc_size={ACC_SIZE_V2} hidden={HIDDEN_V2}, file has {acc_size}/{hidden}"
+            ));
+        }
+
+        let mut off = 16;
+        let mut take_f32 = |n: usize| -> Result<Vec<f32>, String> {
+            if off + n * 4 > data.len() {
+                return Err(format!("NNU2 v3 truncated (scale section): need {} bytes, have {}", off + n * 4, data.len()));
+            }
+            let v = (0..n)
+                .map(|k| {
+                    let p = off + k * 4;
+                    f32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                })
+                .collect();
+            off += n * 4;
+            Ok(v)
+        };
+        let scale_l1 = take_f32(1)?[0];
+        let mut scale_fc2 = Vec::with_capacity(buckets);
+        let mut scale_fc3 = Vec::with_capacity(buckets);
+        for _ in 0..buckets {
+            scale_fc2.push(take_f32(1)?[0]);
+            scale_fc3.push(take_f32(1)?[0]);
+        }
+
+        let mut take_i16 = |n: usize| -> Result<Vec<i16>, String> {
+            if off + n * 2 > data.len() {
+                return Err(format!("NNU2 v3 truncated (weights): need {} bytes, have {}", off + n * 2, data.len()));
+            }
+            let v = (0..n)
+                .map(|k| {
+                    let p = off + k * 2;
+                    i16::from_le_bytes([data[p], data[p + 1]])
+                })
+                .collect();
+            off += n * 2;
+            Ok(v)
+        };
+        let v3_fc1_w = take_i16(num_features * acc_size)?;
+        let v3_fc1_b = take_i16(acc_size)?;
+        let mut v3_fc2_w = Vec::new();
+        let mut v3_fc2_b = Vec::new();
+        let mut v3_fc3_w = Vec::new();
+        let mut v3_fc3_b = Vec::new();
+        for _ in 0..buckets {
+            v3_fc2_w.extend(take_i16(acc_size * hidden)?);
+            v3_fc2_b.extend(take_i16(hidden)?);
+            v3_fc3_w.extend(take_i16(hidden)?);
+            v3_fc3_b.extend(take_i16(1)?);
+        }
+        Ok(Self {
+            input_size: num_features,
+            hidden1: acc_size,
+            hidden2: hidden,
+            nnu2_version: 3,
+            v2: true, acc_size, buckets,
+            v3_fc1_w, v3_fc1_b, v3_fc2_w, v3_fc2_b, v3_fc3_w, v3_fc3_b,
+            v3_scale_l1: scale_l1, v3_scale_fc2: scale_fc2, v3_scale_fc3: scale_fc3,
+            ..Default::default()
         })
     }
 
@@ -270,6 +368,9 @@ impl NnueNetwork {
     pub fn logit_v2(&self, board: &Board) -> f32 {
         if !self.v2 {
             return 0.0;
+        }
+        if self.nnu2_version == 3 {
+            return self.logit_v3(board);
         }
         let acc_n = self.acc_size;
         let hidden = self.hidden2;
@@ -299,6 +400,181 @@ impl NnueNetwork {
             }
         }
         out
+    }
+
+    /// NNU2 version 3 forward pass: same math as `logit_v2`'s f32 path (embedding-sum
+    /// first layer, ReLU, bucket-selected 2-layer head), but in integer arithmetic on
+    /// the i16-quantised weights, using fixed-size stack buffers so this hot per-node
+    /// call makes zero heap allocations (the f32 path above still clones a Vec and
+    /// allocates a features Vec every call — left alone deliberately, see nnue.rs
+    /// module docs / task-9-report.md: it must stay the unoptimised f32 baseline).
+    ///
+    /// Accumulation widths: the first layer (23 additions of i16 values into the
+    /// per-neuron sum) fits comfortably in i32, as instructed. The two dot products
+    /// after it (1024-wide and 32-wide) do NOT: a single i16*i32 product from the
+    /// first dot product can already exceed i32::MAX for this net's real scale
+    /// factors (verified empirically — see task-9-report.md), so those two
+    /// reductions accumulate in i64. (An i16-accumulator variant was tried — capping
+    /// `scale_l1` so the accumulator itself fits in i16, making the dot product
+    /// i16*i16 instead of i16*i32 — on the theory that a narrower operand type
+    /// vectorises better; measured effect was ~0 (within noise) both with and
+    /// without AVX2, while fidelity margin got measurably worse (worst case
+    /// 0.0004 -> 0.0038), so it was reverted. See task-9-report.md.) The final
+    /// division back to a float logit is done in f64 before the (now small, O(1))
+    /// result is narrowed to f32 — narrowing the raw i64 accumulator to f32 first
+    /// would lose ~7 decimal digits of precision on values that can reach
+    /// ~1e13-1e14 and silently blow the 0.02 fidelity budget.
+    fn logit_v3(&self, board: &Board) -> f32 {
+        let acc_n = self.acc_size;
+        let hidden = self.hidden2;
+        debug_assert_eq!(acc_n, ACC_SIZE_V2);
+        debug_assert_eq!(hidden, HIDDEN_V2);
+
+        let mut acc = [0i32; ACC_SIZE_V2];
+        for (a, &b) in acc.iter_mut().zip(self.v3_fc1_b.iter()) {
+            *a = b as i32;
+        }
+        for f in build_features_v2_arr(board) {
+            let base = f as usize * acc_n;
+            let row = &self.v3_fc1_w[base..base + acc_n];
+            // Iterator form (vs. `for j in 0..acc_n { acc[j] += row[j] }`) is the more
+            // idiomatic way to let LLVM elide bounds checks; measured effect on this
+            // hot loop was small (~1-2%, see task-9-report.md) — kept for the (untested
+            // here) codegen on other targets/compiler versions, not because it moved
+            // the NPS numbers reported for this task.
+            for (a, &w) in acc.iter_mut().zip(row.iter()) {
+                *a += w as i32;
+            }
+        }
+        for a in acc.iter_mut() {
+            if *a < 0 {
+                *a = 0;
+            }
+        }
+
+        let b = phase_bucket(board).min(self.buckets - 1);
+        let s1 = self.v3_scale_l1;
+        let s2 = self.v3_scale_fc2[b];
+        let s3 = self.v3_scale_fc3[b];
+        let s1_i64 = s1 as i64;
+
+        let w2 = &self.v3_fc2_w[b * hidden * acc_n..(b + 1) * hidden * acc_n];
+        let b2 = &self.v3_fc2_b[b * hidden..(b + 1) * hidden];
+        let w3 = &self.v3_fc3_w[b * hidden..(b + 1) * hidden];
+        let b3 = self.v3_fc3_b[b];
+
+        // h[j] accumulates at combined scale (s1 * s2): fc2_b is only scaled by s2, so
+        // its contribution is multiplied up by s1 to match the fc2_w[i]*acc[i] terms
+        // (each already at scale s1*s2, since acc[i] carries s1 and fc2_w carries s2).
+        let mut h = [0i64; HIDDEN_V2];
+        for j in 0..hidden {
+            let row = &w2[j * acc_n..(j + 1) * acc_n];
+            let mut sum: i64 = b2[j] as i64 * s1_i64;
+            for (&w, &a) in row.iter().zip(acc.iter()) {
+                sum += w as i64 * a as i64;
+            }
+            h[j] = sum.max(0);
+        }
+
+        // out accumulates at combined scale (s1 * s2 * s3); fc3_b is scaled by s3
+        // only, so it is multiplied up by (s1 * s2) to match the fc3_w[j]*h[j] terms.
+        let mut out: i64 = b3 as i64 * s1_i64 * s2 as i64;
+        for (&w, &hv) in w3.iter().zip(h.iter()) {
+            out += w as i64 * hv;
+        }
+        let denom = s1 as f64 * s2 as f64 * s3 as f64;
+        (out as f64 / denom) as f32
+    }
+
+    /// Quantise this network's weights (must be an f32 NNU2 / version 2 net) into the
+    /// version-3 (i16) byte layout that `load_nnu2_i16` reads. One scale factor per
+    /// tensor group, chosen as `floor(32767 / observed_absmax * 0.999)`:
+    /// - fc1_w and fc1_b share a scale (`v3_scale_l1`) because they are summed into
+    ///   the same accumulator before anything else happens to them.
+    /// - each bucket's fc2_w/fc2_b share a scale, and each bucket's fc3_w/fc3_b share
+    ///   a (different) scale, because bucket weight magnitudes differ a lot (this
+    ///   net's fc2 absmax ranges ~0.048-0.34 across buckets — sharing one scale
+    ///   across buckets would waste most of int16's range on the smaller ones).
+    ///
+    /// The 0.999 margin exists so no weight's rounded quantised value can land
+    /// exactly on the int16 boundary and overflow; `quantise_one` below still checks
+    /// and returns an Err rather than silently clamping if it ever does.
+    ///
+    /// This is also exposed as the Rust-side reference implementation the Python
+    /// exporter's `export_nnu2_v3` mirrors — see research/training/train_nnue_v2.py.
+    pub fn export_v3(&self) -> Result<Vec<u8>, String> {
+        if !self.v2 || self.nnu2_version != 2 {
+            return Err("export_v3 requires an f32 NNU2 (version 2) network".into());
+        }
+        let acc_n = self.acc_size;
+        let hidden = self.hidden2;
+        let buckets = self.buckets;
+        let num_features = self.input_size;
+
+        let scale_l1 = pick_scale(self.v2_fc1_w.iter().chain(self.v2_fc1_b.iter()).copied());
+        let mut scale_fc2 = Vec::with_capacity(buckets);
+        let mut scale_fc3 = Vec::with_capacity(buckets);
+        for b in 0..buckets {
+            let w2 = &self.v2_fc2_w[b * hidden * acc_n..(b + 1) * hidden * acc_n];
+            let bias2 = &self.v2_fc2_b[b * hidden..(b + 1) * hidden];
+            scale_fc2.push(pick_scale(w2.iter().chain(bias2.iter()).copied()));
+            let w3 = &self.v2_fc3_w[b * hidden..(b + 1) * hidden];
+            let bias3 = &self.v2_fc3_b[b..b + 1];
+            scale_fc3.push(pick_scale(w3.iter().chain(bias3.iter()).copied()));
+        }
+
+        // Multiply in f64 (matching the Python exporter's np.float64 promotion) rather
+        // than f32: a handful of values per net land close enough to a rounding
+        // boundary (x.4999995 vs x.5000005) that f32-vs-f64 multiply precision flips
+        // the rounded integer by 1 — harmless for fidelity either way (sub-ULP), but
+        // computing it the same way in both places means the two independent
+        // quantisers (this one and export_nnu2_v3 in train_nnue_v2.py) produce
+        // byte-identical output from the same source weights, which is worth having
+        // as a cross-check.
+        let quantise_one = |v: f32, s: f32| -> Result<i16, String> {
+            let scaled = (v as f64 * s as f64).round();
+            if scaled.abs() > 32767.0 {
+                return Err(format!("quantisation overflow: {v} * {s} = {scaled}"));
+            }
+            Ok(scaled as i16)
+        };
+
+        let mut out = Vec::with_capacity(
+            16 + 4 + buckets * 8 + (num_features * acc_n + acc_n) * 2
+                + buckets * (acc_n * hidden + hidden + hidden + 1) * 2,
+        );
+        out.extend_from_slice(&0x324E554Eu32.to_le_bytes());
+        for v in [3u16, num_features as u16, acc_n as u16, hidden as u16, buckets as u16, 0u16] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&scale_l1.to_le_bytes());
+        for b in 0..buckets {
+            out.extend_from_slice(&scale_fc2[b].to_le_bytes());
+            out.extend_from_slice(&scale_fc3[b].to_le_bytes());
+        }
+        for &v in &self.v2_fc1_w {
+            out.extend_from_slice(&quantise_one(v, scale_l1)?.to_le_bytes());
+        }
+        for &v in &self.v2_fc1_b {
+            out.extend_from_slice(&quantise_one(v, scale_l1)?.to_le_bytes());
+        }
+        for b in 0..buckets {
+            let w2 = &self.v2_fc2_w[b * hidden * acc_n..(b + 1) * hidden * acc_n];
+            let bias2 = &self.v2_fc2_b[b * hidden..(b + 1) * hidden];
+            let w3 = &self.v2_fc3_w[b * hidden..(b + 1) * hidden];
+            let bias3 = self.v2_fc3_b[b];
+            for &v in w2 {
+                out.extend_from_slice(&quantise_one(v, scale_fc2[b])?.to_le_bytes());
+            }
+            for &v in bias2 {
+                out.extend_from_slice(&quantise_one(v, scale_fc2[b])?.to_le_bytes());
+            }
+            for &v in w3 {
+                out.extend_from_slice(&quantise_one(v, scale_fc3[b])?.to_le_bytes());
+            }
+            out.extend_from_slice(&quantise_one(bias3, scale_fc3[b])?.to_le_bytes());
+        }
+        Ok(out)
     }
 
     /// Build 40-input feature vector
@@ -488,6 +764,28 @@ impl NnueNetwork {
 pub const NUM_FEATURES_V2: usize = 292;
 pub const NUM_BUCKETS_V2: usize = 4;
 const ACTIVE_FEATURES_V2: usize = 23;
+// The trained architecture's dimensions (research/training/train_nnue_v2.py: ACC=1024,
+// HIDDEN=32). NNU2 v3 hard-codes these as fixed-size stack buffers in `logit_v3` to
+// avoid a heap allocation on every node visited during search; `load_nnu2_i16` checks
+// the file's header against them and errors instead of silently truncating/panicking
+// if a future net changes these dimensions.
+const ACC_SIZE_V2: usize = 1024;
+const HIDDEN_V2: usize = 32;
+
+/// `floor(32767 / absmax(vals) * 0.999)`: the largest per-tensor integer scale that
+/// keeps every quantised value inside i16 range with a small margin, so no value's
+/// rounded quantisation can land exactly on the boundary and overflow. Falls back to
+/// 1.0 for an all-zero tensor (nothing to scale, and it avoids a divide-by-zero).
+///
+/// This is the Rust reference the Python exporter's `_pick_scale` mirrors — see
+/// research/training/train_nnue_v2.py::export_nnu2_v3. Keep both in lockstep.
+fn pick_scale(vals: impl Iterator<Item = f32>) -> f32 {
+    let absmax = vals.fold(0.0f32, |m, v| m.max(v.abs()));
+    if absmax <= 0.0 {
+        return 1.0;
+    }
+    (32767.0 / absmax * 0.999).floor()
+}
 
 /// Stone counts enter as one-hot buckets, not as a scalar: endgames turn on exact counts
 /// and parity (a pit holding exactly 2 is a tuzdyk threat), and a first layer over a
@@ -509,22 +807,40 @@ fn board_stones(board: &Board) -> u32 {
 }
 
 pub fn build_features_v2(board: &Board) -> Vec<u16> {
+    build_features_v2_arr(board).to_vec()
+}
+
+/// Same 23 active features as `build_features_v2`, in the same order, but written
+/// into a fixed-size stack array instead of an allocated `Vec` — this is the one and
+/// only place the feature layout is computed; `build_features_v2` just copies it out
+/// into a Vec for callers that want one. Used directly by the v3 (i16) forward pass,
+/// which runs per node visited in search and must not allocate.
+#[inline]
+fn build_features_v2_arr(board: &Board) -> [u16; ACTIVE_FEATURES_V2] {
     let me = board.side_to_move.index();
     let opp = 1 - me;
-    let mut f = Vec::with_capacity(ACTIVE_FEATURES_V2);
+    let mut f = [0u16; ACTIVE_FEATURES_V2];
+    let mut n = 0;
     for i in 0..NUM_PITS {
-        f.push((i * 14 + count_bucket(board.pits[me][i])) as u16);
+        f[n] = (i * 14 + count_bucket(board.pits[me][i])) as u16;
+        n += 1;
     }
     for i in 0..NUM_PITS {
-        f.push((126 + i * 14 + count_bucket(board.pits[opp][i])) as u16);
+        f[n] = (126 + i * 14 + count_bucket(board.pits[opp][i])) as u16;
+        n += 1;
     }
-    f.push((252 + (board.kazan[me] as usize / 10).min(8)) as u16);
-    f.push((261 + (board.kazan[opp] as usize / 10).min(8)) as u16);
+    f[n] = (252 + (board.kazan[me] as usize / 10).min(8)) as u16;
+    n += 1;
+    f[n] = (261 + (board.kazan[opp] as usize / 10).min(8)) as u16;
+    n += 1;
     let tuz = |t: i8| if t >= 0 { t as usize } else { 9 };
-    f.push((270 + tuz(board.tuzdyk[me])) as u16);
-    f.push((280 + tuz(board.tuzdyk[opp])) as u16);
-    f.push((290 + (board_stones(board) % 2) as usize) as u16);
-    debug_assert_eq!(f.len(), ACTIVE_FEATURES_V2);
+    f[n] = (270 + tuz(board.tuzdyk[me])) as u16;
+    n += 1;
+    f[n] = (280 + tuz(board.tuzdyk[opp])) as u16;
+    n += 1;
+    f[n] = (290 + (board_stones(board) % 2) as usize) as u16;
+    n += 1;
+    debug_assert_eq!(n, ACTIVE_FEATURES_V2);
     f
 }
 
@@ -540,7 +856,7 @@ pub fn phase_bucket(board: &Board) -> usize {
 #[cfg(test)]
 mod tests_v2 {
     use super::*;
-    use crate::board::Board;
+    use crate::board::{Board, parse_position};
 
     #[test]
     fn start_position_features() {
@@ -667,5 +983,151 @@ mod tests_v2 {
         std::fs::write(&path, &out).unwrap();
         let result = NnueNetwork::load(path.to_str().unwrap());
         assert!(result.is_err(), "truncated NNU2 header must return Err, not panic");
+    }
+
+    /// Same idea as `synthetic_v2`, but for version 3: real-sized (1024 acc / 32
+    /// hidden / 4 buckets) since `load_nnu2_i16` rejects any other shape, all-1.0
+    /// scale factors (so the hand-computed expected value is the same as
+    /// `synthetic_v2`'s: an all-integer, all-zero-except-one-path network), and i16
+    /// weights instead of f32. Feature 9 (me pit 0 holding 9 stones) contributes 1 to
+    /// accumulator 0; bucket 0 reads accumulator 0 with weight 1; everything else is
+    /// zero, so the start position's logit is exactly 1.0, same as the v2 fixture.
+    fn synthetic_v3(num_features: usize, acc: usize, hidden: usize, buckets: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x324E554Eu32.to_le_bytes());
+        for v in [3u16, num_features as u16, acc as u16, hidden as u16, buckets as u16, 0u16] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        // scale section: scale_l1, then (scale_fc2[b], scale_fc3[b]) per bucket — all 1.0
+        out.extend_from_slice(&1.0f32.to_le_bytes());
+        for _ in 0..buckets {
+            out.extend_from_slice(&1.0f32.to_le_bytes());
+            out.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        let mut push_i16 = |out: &mut Vec<u8>, v: i16| out.extend_from_slice(&v.to_le_bytes());
+        for f in 0..num_features {
+            for j in 0..acc {
+                push_i16(&mut out, if f == 9 && j == 0 { 1 } else { 0 });
+            }
+        }
+        for _ in 0..acc {
+            push_i16(&mut out, 0);
+        }
+        for b in 0..buckets {
+            for j in 0..hidden {
+                for i in 0..acc {
+                    push_i16(&mut out, if b == 0 && j == 0 && i == 0 { 1 } else { 0 });
+                }
+            }
+            for _ in 0..hidden {
+                push_i16(&mut out, 0);
+            }
+            for j in 0..hidden {
+                push_i16(&mut out, if b == 0 && j == 0 { 1 } else { 0 });
+            }
+            push_i16(&mut out, 0);
+        }
+        out
+    }
+
+    #[test]
+    fn loads_v3_and_evaluates_by_hand() {
+        let bytes = synthetic_v3(NUM_FEATURES_V2, ACC_SIZE_V2, HIDDEN_V2, NUM_BUCKETS_V2);
+        let path = std::env::temp_dir().join("nnue_v3_synthetic.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let net = NnueNetwork::load(path.to_str().unwrap()).expect("v3 file loads");
+        let b = Board::new();
+        let cp = net.evaluate(&b) / 64;
+        assert_eq!(cp, 350, "logit 1.0 must map to 350 cp under v3 too, got {cp}");
+    }
+
+    #[test]
+    fn truncated_v3_scale_section_errors_instead_of_panicking() {
+        // A well-formed 16-byte version-3 header but nothing after it: the scale
+        // section (4 + buckets*8 bytes) and the entire weight payload are missing.
+        // Must be a load error, not a panic or an out-of-bounds read.
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x324E554Eu32.to_le_bytes());
+        for v in [3u16, NUM_FEATURES_V2 as u16, ACC_SIZE_V2 as u16, HIDDEN_V2 as u16, NUM_BUCKETS_V2 as u16, 0u16] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(out.len(), 16);
+        let path = std::env::temp_dir().join("nnue_v3_truncated.bin");
+        std::fs::write(&path, &out).unwrap();
+        let result = NnueNetwork::load(path.to_str().unwrap());
+        assert!(result.is_err(), "truncated NNU2 v3 scale section must return Err, not panic");
+    }
+
+    #[test]
+    fn v3_rejects_mismatched_dimensions() {
+        // logit_v3 uses fixed-size [T; ACC_SIZE_V2]/[T; HIDDEN_V2] stack buffers, so a
+        // file claiming a different acc/hidden size must be rejected at load time,
+        // not silently misread (or worse, accepted and then overrun the buffers).
+        let bytes = synthetic_v3(NUM_FEATURES_V2, 8, 4, NUM_BUCKETS_V2);
+        let path = std::env::temp_dir().join("nnue_v3_bad_dims.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let result = NnueNetwork::load(path.to_str().unwrap());
+        assert!(result.is_err(), "v3 file with acc=8/hidden=4 (not 1024/32) must be rejected");
+    }
+
+    /// The required fidelity gate (task 9): quantising an f32 NNU2 net to version 3
+    /// must not change what it says by more than 0.02 logit on real positions.
+    ///
+    /// Loads the trained f32 candidate (`v2_e12.bin`, NOT committed to git — see
+    /// task-9-report.md), quantises it in-process via `export_v3` (the same code
+    /// path `main.rs`'s `quantize` subcommand and the Python exporter both produce
+    /// independently), reloads the quantised bytes through the real `NnueNetwork::load`
+    /// entry point (so this also exercises `load_nnu2_i16` end to end, not just
+    /// `logit_v3` in isolation), and compares logits on 240 positions sampled from
+    /// data/9qum/games/replays.jsonl.gz (see engine/src/testdata/nnue_v2_sample_positions.txt
+    /// and its generation note in task-9-report.md).
+    #[test]
+    fn quantised_v3_matches_f32_v2_within_tolerance() {
+        let f32_net = NnueNetwork::load("../models/nets/nnue_v2/v2_e12.bin").expect(
+            "models/nets/nnue_v2/v2_e12.bin must exist locally (gitignored, not committed — \
+             the candidate net produced by research/training/train_nnue_v2.py) for this test",
+        );
+        let v3_bytes = f32_net.export_v3().expect("export_v3 must succeed on a real trained net");
+        let path = std::env::temp_dir().join("nnue_v2_e12_v3_fidelity.bin");
+        std::fs::write(&path, &v3_bytes).unwrap();
+        let v3_net = NnueNetwork::load(path.to_str().unwrap()).expect("exported v3 bytes must load");
+        assert_eq!(v3_net.nnu2_version, 3, "sanity: the reloaded net took the v3 path");
+
+        const FIXTURE: &str = include_str!("testdata/nnue_v2_sample_positions.txt");
+        let positions: Vec<&str> = FIXTURE
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        assert!(
+            positions.len() >= 200,
+            "fixture must supply at least 200 positions, has {}",
+            positions.len()
+        );
+
+        let mut worst = 0.0f32;
+        let mut worst_pos = "";
+        let mut sum_abs = 0.0f64;
+        for &pos in &positions {
+            let b = parse_position(pos).unwrap_or_else(|e| panic!("bad fixture position {pos}: {e}"));
+            let want = f32_net.logit_v2(&b);
+            let got = v3_net.logit_v2(&b);
+            let diff = (want - got).abs();
+            sum_abs += diff as f64;
+            if diff > worst {
+                worst = diff;
+                worst_pos = pos;
+            }
+        }
+        let mean = sum_abs / positions.len() as f64;
+        println!(
+            "quantised_v3_matches_f32_v2_within_tolerance: n={} worst={:.6} (at {}) mean={:.6}",
+            positions.len(), worst, worst_pos, mean
+        );
+        assert!(
+            worst <= 0.02,
+            "v3 logit diverges from f32 v2 by {worst:.6} at {worst_pos} (n={}), exceeds the 0.02 budget",
+            positions.len()
+        );
     }
 }

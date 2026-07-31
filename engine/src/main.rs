@@ -241,6 +241,55 @@ fn main() {
                     Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
                 }
             }
+            "benchnnue" => {
+                // benchnnue <weights.bin> <pos> [iters]  -- raw evaluate() throughput,
+                // isolated from search/move-gen/TT overhead. Diagnostic tool used while
+                // building the NNU2 v3 (i16) path in task 9; see task-9-report.md.
+                let w = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                let pos = args.get(3).map(|s| s.as_str()).unwrap_or("");
+                let iters: u64 = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(5_000_000);
+                let net = match NnueNetwork::load(w) {
+                    Ok(n) => n,
+                    Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
+                };
+                let board = match board::parse_position(pos) {
+                    Ok(b) => b,
+                    Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
+                };
+                let start = std::time::Instant::now();
+                let mut acc: i64 = 0;
+                for _ in 0..iters {
+                    acc = acc.wrapping_add(net.evaluate(&board) as i64);
+                }
+                let elapsed = start.elapsed();
+                let per_call_ns = elapsed.as_nanos() as f64 / iters as f64;
+                println!(
+                    "{iters} calls in {:.3}s ({:.2} ns/call, {:.0} calls/s) [sink={acc}]",
+                    elapsed.as_secs_f64(), per_call_ns, iters as f64 / elapsed.as_secs_f64()
+                );
+            }
+            "quantize" => {
+                // quantize <in_v2.bin> <out_v3.bin>  -- convert an f32 NNU2 (version 2)
+                // net to the i16-quantised version-3 format (see NnueNetwork::export_v3
+                // in nnue.rs and task-9-report.md for the scale-factor recipe). Rust-side
+                // equivalent of research/training/train_nnue_v2.py's export_nnu2_v3.
+                let inp = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                let outp = args.get(3).map(|s| s.as_str()).unwrap_or("");
+                let net = match NnueNetwork::load(inp) {
+                    Ok(n) => n,
+                    Err(e) => { eprintln!("error loading {inp}: {e}"); std::process::exit(2); }
+                };
+                match net.export_v3() {
+                    Ok(bytes) => {
+                        if let Err(e) = std::fs::write(outp, &bytes) {
+                            eprintln!("error writing {outp}: {e}");
+                            std::process::exit(2);
+                        }
+                        println!("wrote {outp} ({} bytes)", bytes.len());
+                    }
+                    Err(e) => { eprintln!("error quantising {inp}: {e}"); std::process::exit(2); }
+                }
+            }
             "serve" => run_serve(),
             _ => print_usage(),
         }
@@ -265,6 +314,8 @@ fn print_usage() {
     println!("  togyzkumalaq-engine analyze <position> [time_ms]");
     println!("                                 - Analyze position (JSON output)");
     println!("  togyzkumalaq-engine serve      - Persistent stdin/stdout protocol");
+    println!("  togyzkumalaq-engine quantize <in_v2.bin> <out_v3.bin>");
+    println!("                                 - Quantise an f32 NNU2 net to i16 (version 3)");
     println!("    Position format: w0,w1,...,w8/b0,...,b8/kw,kb/tw,tb/side");
 }
 

@@ -71,6 +71,77 @@ def export_nnu2(model, path):
             f.write(model.fc3[b].bias.detach().cpu().numpy().astype(np.float32).tobytes())
 
 
+def _pick_scale(*arrays):
+    """floor(32767 / absmax * 0.999): the largest per-tensor integer scale that keeps
+    every quantised value inside int16 range with a small margin (so a rounded value
+    can never land exactly on the +-32768 boundary). Falls back to 1.0 for an
+    all-zero tensor. Mirrors NnueNetwork::pick_scale in engine/src/nnue.rs — the two
+    must stay identical, see task-9-report.md for why this scale was chosen (per-tensor
+    absmax: real weight magnitudes differ ~7x bucket to bucket, so each bucket's
+    fc2/fc3 get their own scale rather than sharing one sized for the largest)."""
+    absmax = max(float(np.abs(a).max()) for a in arrays)
+    if absmax <= 0:
+        return 1.0
+    return float(np.floor(32767.0 / absmax * 0.999))
+
+
+def _quantise(arr, scale):
+    q = np.round(arr.astype(np.float64) * scale)
+    if np.abs(q).max() > 32767:
+        raise ValueError(f"quantisation overflow at scale {scale}: max |q|={np.abs(q).max()}")
+    return q.astype(np.int16)
+
+
+def export_nnu2_v3(model, path):
+    """Version-3 NNU2 writer: same header as export_nnu2 (magic, num_features, acc,
+    hidden, buckets, pad) but version=3, followed by a scale-factor section, then i16
+    weights instead of f32 — for the integer forward pass in
+    engine/src/nnue.rs::NnueNetwork::logit_v3 (NnueNetwork::load_nnu2_i16 reads this
+    exact layout; keep the two in lockstep).
+
+    Scale factors (see _pick_scale): fc1_w and acc_bias share one scale (`scale_l1`)
+    because they are summed directly into the same accumulator; each bucket's
+    fc2 weight+bias share a scale, and each bucket's fc3 weight+bias share a
+    (different) scale, because this net's weight magnitudes vary a lot bucket to
+    bucket (measured fc2 absmax ~0.048-0.34 across the 4 buckets) — sharing one
+    scale across buckets would waste most of int16's range on the smaller ones.
+
+    Byte layout:
+      u32 magic, u16 version(=3), u16 num_features, u16 acc, u16 hidden, u16 buckets, u16 pad
+      f32 scale_l1
+      per bucket: f32 scale_fc2[b], f32 scale_fc3[b]
+      i16 fc1_w[num_features*acc]  (feature-major, same order as export_nnu2)
+      i16 fc1_b[acc]
+      per bucket: i16 fc2_w[acc*hidden], i16 fc2_b[hidden], i16 fc3_w[hidden], i16 fc3_b[1]
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    emb = model.emb.weight.detach().cpu().numpy().astype(np.float32)
+    bias = model.acc_bias.detach().cpu().numpy().astype(np.float32)
+    scale_l1 = _pick_scale(emb, bias)
+
+    fc2w = [model.fc2[b].weight.detach().cpu().numpy().astype(np.float32) for b in range(model.buckets)]
+    fc2b = [model.fc2[b].bias.detach().cpu().numpy().astype(np.float32) for b in range(model.buckets)]
+    fc3w = [model.fc3[b].weight.detach().cpu().numpy().astype(np.float32).ravel() for b in range(model.buckets)]
+    fc3b = [model.fc3[b].bias.detach().cpu().numpy().astype(np.float32) for b in range(model.buckets)]
+    scale_fc2 = [_pick_scale(fc2w[b], fc2b[b]) for b in range(model.buckets)]
+    scale_fc3 = [_pick_scale(fc3w[b], fc3b[b]) for b in range(model.buckets)]
+
+    with open(path, "wb") as f:
+        f.write(struct.pack("<I", 0x324E554E))
+        f.write(struct.pack("<6H", 3, NUM_FEATURES, model.acc, model.hidden, model.buckets, 0))
+        f.write(struct.pack("<f", scale_l1))
+        for b in range(model.buckets):
+            f.write(struct.pack("<ff", scale_fc2[b], scale_fc3[b]))
+        f.write(_quantise(emb, scale_l1).tobytes())
+        f.write(_quantise(bias, scale_l1).tobytes())
+        for b in range(model.buckets):
+            f.write(_quantise(fc2w[b], scale_fc2[b]).tobytes())
+            f.write(_quantise(fc2b[b], scale_fc2[b]).tobytes())
+            f.write(_quantise(fc3w[b], scale_fc3[b]).tobytes())
+            f.write(_quantise(fc3b[b], scale_fc3[b]).tobytes())
+    return {"scale_l1": scale_l1, "scale_fc2": scale_fc2, "scale_fc3": scale_fc3}
+
+
 def load_bin(path):
     raw = np.fromfile(path, dtype=np.uint8)
     n = len(raw) // RECORD_SIZE
@@ -120,7 +191,23 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--w-net", type=float, default=1.0, help="weight of 9qum-labelled records")
     ap.add_argument("--w-outcome", type=float, default=0.3, help="weight of outcome-only records")
+    ap.add_argument("--quantize-only", metavar="PT_PATH", default=None,
+                     help="skip training: load a .pt checkpoint (e.g. an already-trained "
+                          "v2_e12.pt) and export it as version-3 (i16 quantised) NNU2 to "
+                          "PT_PATH with '.pt' replaced by '_v3.bin', then exit")
     a = ap.parse_args()
+
+    if a.quantize_only:
+        model = NnueV2()
+        model.load_state_dict(torch.load(a.quantize_only, map_location="cpu"))
+        model.eval()
+        out_path = os.path.splitext(a.quantize_only)[0] + "_v3.bin"
+        scales = export_nnu2_v3(model, out_path)
+        print(f"wrote {out_path}")
+        print(f"  scale_l1={scales['scale_l1']}")
+        print(f"  scale_fc2={scales['scale_fc2']}")
+        print(f"  scale_fc3={scales['scale_fc3']}")
+        return
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     model = NnueV2().to(dev)
