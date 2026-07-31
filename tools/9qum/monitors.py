@@ -57,15 +57,16 @@ def load_val_positions(corpus, sample_per_bucket, seed=5):
             r0 = meta.get("r0_before") or 0
             r1 = meta.get("r1_before") or 0
             moves = (g.get("states") or [{}])[0].get("moves") or []
+            gid = g["game_id"]
             for ply, st in enumerate(g["states"]):
                 y = 1.0 if g["winner"] == st["to_move"] else 0.0
                 dk = st["kazan"][0] - st["kazan"][1]
                 if 40 <= ply < 80:
-                    buckets["mid"].append((st, y))
+                    buckets["mid"].append((st, y, gid, ply))
                 elif ply >= 80 and abs(dk) <= 8:
-                    buckets["close"].append((st, y))
+                    buckets["close"].append((st, y, gid, ply))
                 elif ply >= 80 and abs(dk) >= 20:
-                    buckets["clear"].append((st, y))
+                    buckets["clear"].append((st, y, gid, ply))
                 if ply < len(moves) and min(r0, r1) >= 2000:
                     buckets["policy"].append((st, moves[ply]["hole"]))
     rng = random.Random(seed)
@@ -73,6 +74,33 @@ def load_val_positions(corpus, sample_per_bucket, seed=5):
         if len(buckets[k]) > sample_per_bucket:
             buckets[k] = rng.sample(buckets[k], sample_per_bucket)
     return buckets
+
+
+def load_curves(corpus):
+    """game_id -> {ply: win} where win is seat 0's win probability, as a percent (0-100).
+
+    NOT the side-to-move's perspective -- read as seat 0 it agrees with recorded outcomes
+    ~82% of the time; read as the mover it collapses to ~49.9% (see task-5 fix-round-1
+    finding). Callers must convert with the position's own to_move before comparing.
+    """
+    curves = {}
+    path = os.path.join(corpus, "analysis", "curves.jsonl.gz")
+    if not os.path.exists(path):
+        return curves
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for line in f:
+            g = json.loads(line)
+            curves[g["game_id"]] = {p["ply"]: p["win"] for p in (g.get("points") or [])}
+    return curves
+
+
+def acc_brier(pairs):
+    """Shared scoring code so our engine and the 9qum reference are graded identically."""
+    if not pairs:
+        return None, None
+    acc = 100 * sum(1 for p, y in pairs if (p > 0.5) == (y > 0.5)) / len(pairs)
+    brier = sum((p - y) ** 2 for p, y in pairs) / len(pairs)
+    return acc, brier
 
 
 def main():
@@ -85,22 +113,35 @@ def main():
     a = ap.parse_args()
 
     buckets = load_val_positions(a.corpus, a.sample)
+    curves = load_curves(a.corpus)
     e = Ev(Path(a.engine))
     e.start()
     out = {"engine": a.engine, "ms": a.ms, "label": a.label}
     for name in ("mid", "close", "clear"):
         pairs = []
-        for st, y in buckets[name]:
+        pairs_9qum = []
+        sampled = buckets[name]
+        for st, y, gid, ply in sampled:
             sc, _ = e.score_and_move(pos_of(st), a.ms)
-            if sc is None:
-                continue
-            sc = max(-2000, min(2000, sc))          # mate/EGTB scores would swamp the scale
-            pairs.append((1 / (1 + math.exp(-sc / 350)), y))
-        acc = 100 * sum(1 for p, y in pairs if (p > 0.5) == (y > 0.5)) / len(pairs)
-        brier = sum((p - y) ** 2 for p, y in pairs) / len(pairs)
+            if sc is not None:
+                sc = max(-2000, min(2000, sc))      # mate/EGTB scores would swamp the scale
+                pairs.append((1 / (1 + math.exp(-sc / 350)), y))
+            win_seat0 = (curves.get(gid) or {}).get(ply)   # 9qum's label: seat 0's win %, not the mover's
+            if win_seat0 is not None:
+                p9 = win_seat0 / 100 if st["to_move"] == 0 else 1 - win_seat0 / 100
+                pairs_9qum.append((p9, y))
+        acc, brier = acc_brier(pairs)
+        acc9, brier9 = acc_brier(pairs_9qum)
+        coverage = 100 * len(pairs_9qum) / len(sampled) if sampled else 0.0
         out[f"{name}_acc"] = round(acc, 1)
         out[f"{name}_brier"] = round(brier, 4)
-        print(f"{name:>6}: n={len(pairs):>5}  acc {acc:5.1f}%  brier {brier:.4f}")
+        out[f"{name}_acc_9qum"] = round(acc9, 1) if acc9 is not None else None
+        out[f"{name}_brier_9qum"] = round(brier9, 4) if brier9 is not None else None
+        out[f"{name}_9qum_n"] = len(pairs_9qum)
+        out[f"{name}_9qum_coverage"] = round(coverage, 1)
+        ref_str = (f"acc {acc9:5.1f}%  brier {brier9:.4f}" if pairs_9qum else "no labels")
+        print(f"{name:>6}: n={len(pairs):>5}  acc {acc:5.1f}%  brier {brier:.4f}   "
+              f"| 9qum: n={len(pairs_9qum):>5} ({coverage:4.1f}% coverage)  {ref_str}")
     hits = tot = 0
     for st, played in buckets["policy"]:
         _, mv = e.score_and_move(pos_of(st), a.ms)
@@ -111,6 +152,18 @@ def main():
     e.stop()
     out["policy_match"] = round(100 * hits / max(1, tot), 1)
     print(f"policy match-rate vs >=2000 humans: {out['policy_match']}% of {tot}")
+
+    print("\ncomparison (identical sampled positions, our engine vs the 9qum reference):")
+    for name in ("mid", "close", "clear"):
+        a_ours = out[f"{name}_acc"]
+        a_9 = out[f"{name}_acc_9qum"]
+        if a_9 is None:
+            print(f"  {name:>6}: ours {a_ours:5.1f}%   9qum   n/a (no labels)")
+        else:
+            gap = round(a_ours - a_9, 1)
+            print(f"  {name:>6}: ours {a_ours:5.1f}%   9qum {a_9:5.1f}%   gap {gap:+.1f}   "
+                  f"(coverage {out[f'{name}_9qum_coverage']:.1f}% of {len(buckets[name])})")
+
     with open(os.path.join(a.corpus, "train", "monitors.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps(out, ensure_ascii=False) + "\n")
 
