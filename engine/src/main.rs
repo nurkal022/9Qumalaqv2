@@ -213,6 +213,21 @@ fn main() {
                 let time_ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3000);
                 run_analyze(pos, time_ms);
             }
+            "features" => {
+                // features <pos>  -> active NNUE v2 feature indices, for the Python cross-check
+                let pos = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                match board::parse_position(pos) {
+                    Ok(b) => {
+                        let f = nnue::build_features_v2(&b);
+                        let idx: Vec<String> = f.iter().map(|x| x.to_string()).collect();
+                        println!("{} bucket {}", idx.join(" "), nnue::phase_bucket(&b));
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
+                }
+            }
             "serve" => run_serve(),
             _ => print_usage(),
         }

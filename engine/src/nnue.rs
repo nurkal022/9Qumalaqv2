@@ -355,3 +355,113 @@ impl NnueNetwork {
         }
     }
 }
+
+// NNUE v2: Sparse bucketed feature encoding (292 total features, 23 active)
+pub const NUM_FEATURES_V2: usize = 292;
+pub const NUM_BUCKETS_V2: usize = 4;
+const ACTIVE_FEATURES_V2: usize = 23;
+
+/// Stone counts enter as one-hot buckets, not as a scalar: endgames turn on exact counts
+/// and parity (a pit holding exactly 2 is a tuzdyk threat), and a first layer over a
+/// scaled scalar can only rescale it.
+fn count_bucket(c: u8) -> usize {
+    match c {
+        0..=9 => c as usize,
+        10..=12 => 10,
+        13..=16 => 11,
+        17..=24 => 12,
+        _ => 13,
+    }
+}
+
+fn board_stones(board: &Board) -> u32 {
+    (0..NUM_PITS)
+        .map(|i| board.pits[0][i] as u32 + board.pits[1][i] as u32)
+        .sum()
+}
+
+pub fn build_features_v2(board: &Board) -> Vec<u16> {
+    let me = board.side_to_move.index();
+    let opp = 1 - me;
+    let mut f = Vec::with_capacity(ACTIVE_FEATURES_V2);
+    for i in 0..NUM_PITS {
+        f.push((i * 14 + count_bucket(board.pits[me][i])) as u16);
+    }
+    for i in 0..NUM_PITS {
+        f.push((126 + i * 14 + count_bucket(board.pits[opp][i])) as u16);
+    }
+    f.push((252 + (board.kazan[me] as usize / 10).min(8)) as u16);
+    f.push((261 + (board.kazan[opp] as usize / 10).min(8)) as u16);
+    let tuz = |t: i8| if t >= 0 { t as usize } else { 9 };
+    f.push((270 + tuz(board.tuzdyk[me])) as u16);
+    f.push((280 + tuz(board.tuzdyk[opp])) as u16);
+    f.push((290 + (board_stones(board) % 2) as usize) as u16);
+    debug_assert_eq!(f.len(), ACTIVE_FEATURES_V2);
+    f
+}
+
+pub fn phase_bucket(board: &Board) -> usize {
+    match board_stones(board) {
+        121..=162 => 0,
+        81..=120 => 1,
+        41..=80 => 2,
+        _ => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests_v2 {
+    use super::*;
+    use crate::board::Board;
+
+    #[test]
+    fn start_position_features() {
+        let b = Board::new();
+        let f = build_features_v2(&b);
+        assert_eq!(f.len(), 23, "23 active features per position");
+        // every pit holds 9 stones -> bucket 9
+        for i in 0..9 {
+            assert!(f.contains(&((i * 14 + 9) as u16)), "me pit {i} bucket 9");
+            assert!(f.contains(&((126 + i * 14 + 9) as u16)), "opp pit {i} bucket 9");
+        }
+        assert!(f.contains(&252), "me kazan 0 -> bucket 0");
+        assert!(f.contains(&261), "opp kazan 0 -> bucket 0");
+        assert!(f.contains(&(270 + 9)), "no tuzdyk for me");
+        assert!(f.contains(&(280 + 9)), "no tuzdyk for opp");
+        assert!(f.contains(&290), "162 stones on board -> even parity");
+        assert_eq!(phase_bucket(&b), 0, "full board is phase bucket 0");
+    }
+
+    #[test]
+    fn count_buckets_are_step_functions() {
+        assert_eq!(count_bucket(0), 0);
+        assert_eq!(count_bucket(2), 2);      // the tuzdyk-threat count must be its own bucket
+        assert_eq!(count_bucket(9), 9);
+        assert_eq!(count_bucket(10), 10);
+        assert_eq!(count_bucket(12), 10);
+        assert_eq!(count_bucket(13), 11);
+        assert_eq!(count_bucket(16), 11);
+        assert_eq!(count_bucket(17), 12);
+        assert_eq!(count_bucket(24), 12);
+        assert_eq!(count_bucket(25), 13);
+        assert_eq!(count_bucket(90), 13);
+    }
+
+    #[test]
+    fn tuzdyk_and_phase_are_encoded() {
+        let mut b = Board::new();
+        for i in 0..9 {
+            b.pits[0][i] = 1;
+            b.pits[1][i] = 1;
+        }
+        b.kazan[0] = 72;
+        b.kazan[1] = 72;
+        b.tuzdyk[0] = 6;
+        b.tuzdyk[1] = -1;
+        let f = build_features_v2(&b);
+        assert!(f.contains(&(270 + 6)), "me tuzdyk on pit 6");
+        assert!(f.contains(&(280 + 9)), "opp has no tuzdyk");
+        assert!(f.contains(&(252 + 7)), "kazan 72 -> bucket 7");
+        assert_eq!(phase_bucket(&b), 3, "18 stones on board is the last phase bucket");
+    }
+}
