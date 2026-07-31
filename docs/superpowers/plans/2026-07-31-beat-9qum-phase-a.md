@@ -1217,7 +1217,27 @@ POSITIONS = [
 ]
 
 
+def test_vectorised_features_match_scalar():
+    """train_nnue_v2.build_feature_matrix is a third implementation of the layout (after
+    Rust and the scalar Python one). Without this check it can drift and the net trains on
+    features nothing else produces."""
+    import numpy as np
+    pits = np.array([p for p, _, _, _ in POSITIONS], dtype=np.int64)
+    kazan = np.array([k for _, k, _, _ in POSITIONS], dtype=np.int64)
+    tuz = np.array([[-1 if t[0] is None else t[0] - 9, -1 if t[1] is None else t[1]]
+                    for _, _, t, _ in POSITIONS], dtype=np.int64)
+    stm = np.array([s for _, _, _, s in POSITIONS], dtype=np.int64)
+    feats, phase = tn.build_feature_matrix(pits, kazan, tuz, stm)
+    for i, (p, k, t, s) in enumerate(POSITIONS):
+        want = sorted(fv.build_features(p, k, t, s))
+        got = sorted(int(x) for x in feats[i])
+        assert want == got, f"row {i}: vectorised {got} != scalar {want}"
+        assert int(phase[i]) == fv.phase_bucket(p), f"row {i}: phase bucket differs"
+    print(f"OK: vectorised and scalar feature builders agree on {len(POSITIONS)} rows")
+
+
 def main():
+    test_vectorised_features_match_scalar()
     torch.manual_seed(0)
     model = tn.NnueV2()
     model.eval()
