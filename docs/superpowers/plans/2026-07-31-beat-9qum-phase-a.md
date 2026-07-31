@@ -1694,3 +1694,56 @@ git commit -m "train: A2 label-weight sweep and phase-A verdict"
 - **Type consistency.** `build_features_v2`/`build_features` return feature indices only,
   never counts; `logit_v2` returns the raw logit and `evaluate` returns cp×64; `RECORD_SIZE`
   is 68 in the converter, the trainer and the tests.
+
+---
+
+## Redirect after the A1 measurement (2026-07-31)
+
+Task 7 measured a NEGATIVE result for `v2_e12` and, importantly, named the causes. Two
+independent 100-game runs at equal time gave 5.0% and 11.5% (Elo −512 and −354), and the NPS
+ratio replicated at 0.23× / 0.243× against a ≥0.5× requirement. The close-endgame value did
+improve as designed (79.3% → 85.2%, Brier 0.173 → 0.116), so the encoding hypothesis holds;
+what failed is the engineering around it.
+
+Task 8's label-weight sweep is therefore **deferred**: while the engine is 4× slower and its
+eval is on a different numeric scale, the monitors and the gate measure different things and
+any weighting would be fitted to an artefact. It returns once speed and scale reach parity.
+
+### Task 9: restore eval speed (i16 quantisation + incremental accumulator)
+
+**Files:** Modify `engine/src/nnue.rs`, `research/training/train_nnue_v2.py` (exporter), and
+add tests to the existing `tests_v2` module.
+
+**Interfaces:** `NNU2` gains a version 3 that stores i16 weights with documented scale factors;
+`load_v2` keeps reading version 2 f32 files so `v2_e12.bin` stays loadable for comparison.
+
+Acceptance: NPS ≥ 0.5× the baseline on the non-book position
+`1,12,12,12,12,3,1,13,12/12,0,11,11,11,1,9,1,2/22,4/-1,-1/1` at `go time 3000`, AND the
+quantised net's logit stays within 0.02 of the f32 net's on 200 sampled positions (a test), so
+the speedup does not silently change what the net says.
+
+### Task 10: calibrate the output scale to the search's expectations
+
+**Files:** Modify `engine/src/nnue.rs` (the logit → cp mapping only).
+
+The v2 mapping `cp = 350 × logit` saturates toward ±3000 while the legacy eval's normal range
+is in the tens: on `0,1,1,1,2,3,3,1,4/1,2,0,0,5,5,3,1,2/40,30/-1,-1/0` the baseline scores +94
+and v2 scores −589. The search's static-eval pruning margins were tuned for the legacy scale.
+
+Fit an affine map from the v2 logit to the legacy eval's units on a sample of positions
+(regress the baseline engine's `score` against `logit` over a few thousand val-split positions,
+excluding EGTB/mate-range scores), replace the hardcoded 350 with the fitted coefficients, and
+record them in the report. Acceptance: on the same sample, the v2 engine's score distribution
+has a mean and standard deviation within 25% of the baseline's, and `ab_match` at equal time
+improves materially over the 5–11.5% baseline measured for `v2_e12`.
+
+### Task 11: re-measure A1
+
+Re-run the full acceptance set (monitors at the full 900-position sample, NPS, `ab_match` 100
+games at 1000 ms) and record a new row in `RESULTS.md`. Only if `ab_match` clears 55% does the
+9qum live gate become worth its ~1.5 hours.
+
+**Long measurements run from the controller, not from a subagent:** a subagent's Bash
+backgrounds anything past its tool timeout, and its stdout dies with the turn — this already
+cost one full 50-minute `ab_match` run. Subagents implement and test; the controller runs the
+long measurements and hands back the numbers in a file.
