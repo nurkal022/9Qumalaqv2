@@ -205,6 +205,12 @@ impl NnueNetwork {
     }
 
     fn load_v2(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 16 {
+            return Err(format!(
+                "NNU2 header truncated: need 16 bytes, have {}",
+                data.len()
+            ));
+        }
         let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]) as usize;
         let version = rd_u16(4);
         if version != 2 {
@@ -644,5 +650,22 @@ mod tests_v2 {
             .expect("the shipped legacy weights must keep loading");
         let cp = net.evaluate(&Board::new());
         assert!(cp.abs() < 100_000, "legacy eval returns a sane number, got {cp}");
+    }
+
+    #[test]
+    fn truncated_v2_header_errors_instead_of_panicking() {
+        // Only magic (4 bytes) + version (2 bytes), padded to 8 bytes total — well short
+        // of the 16-byte header (num_features/acc_size/hidden/buckets/pad are missing). A
+        // half-written export (e.g. process killed mid-write) must be reported as a load
+        // error, not crash the engine process.
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x324E554Eu32.to_le_bytes());
+        out.extend_from_slice(&2u16.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes());
+        assert_eq!(out.len(), 8, "sanity: magic(4) + version(2) + 2 more bytes = 8");
+        let path = std::env::temp_dir().join("nnue_v2_truncated.bin");
+        std::fs::write(&path, &out).unwrap();
+        let result = NnueNetwork::load(path.to_str().unwrap());
+        assert!(result.is_err(), "truncated NNU2 header must return Err, not panic");
     }
 }
