@@ -99,6 +99,26 @@ Architecture-independent; these decide every promotion.
 | Brier on held-out games | 0.111 | 0.195 | ≤0.11 |
 | policy match-rate vs strong humans | 51.6% / 84.2% top-3 | measured in A0 | ≥52% |
 
+**Superseded 2026-07-31 by a like-for-like measurement (A0, `tools/9qum/monitors.py`).** The
+table above measured the two evaluators on *different* position populations — ours over the
+whole decisive curve-covered corpus, theirs likewise, but the monitor samples only val-split
+games. Comparing across populations is not valid, so the monitor now scores both over the
+**same** sampled positions in one pass. Those numbers govern from here on (900 positions per
+bucket, 100% label coverage):
+
+| bucket | our baseline | 9qum reference | gap |
+|---|---|---|---|
+| midgame 40≤ply<80 | 81.5% | 86.7% | −5.2 |
+| close endgame | 79.3% | 92.9% | −13.6 |
+| clear endgame | 84.7% | 96.0% | −11.3 |
+| Brier (mid/close/clear) | 0.184/0.173/0.136 | 0.095/0.054/0.026 | — |
+| policy match-rate vs ≥2000 humans | 38.9% | 51.6% (their reported) | −12.7 |
+
+The reference landed within 1–2 points of the whole-corpus figures for their net, which
+cross-validates the method; the earlier "clear endgame is an outlier" reading was an artifact
+of the population mismatch and is retired. The diagnosis is unchanged and now measured on
+identical positions: we trail in every phase, worst in the endgame.
+
 Held-out sets are split **by game, never by ply** — plies inside a game are autocorrelated
 and a per-ply split leaks the outcome.
 

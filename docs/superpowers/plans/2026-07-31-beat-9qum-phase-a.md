@@ -1515,8 +1515,24 @@ firing.
 ```bash
 python3.12 tools/9qum/monitors.py --engine /tmp/eng_v2/togyzkumalaq-engine --ms 100 --label v2_e12
 ```
-Acceptance: mid ≥86%, close ≥91%, clear ≥95%, Brier ≤0.11. Below that, go to Task 8 rather
-than to the gate — the gate costs hours, the monitors cost minutes.
+
+Task 5 replaced the spec's whole-corpus figures with a like-for-like measurement: the monitor
+now scores our engine and 9qum's stored labels over the **same** sampled val-split positions
+in one pass, so these are the numbers that govern. Baseline and reference, 900 positions per
+bucket, 100% label coverage:
+
+| bucket | our baseline | 9qum reference | gap | A1 screen (half the gap) |
+|---|---|---|---|---|
+| midgame 40≤ply<80 | 81.5% | 86.7% | −5.2 | ≥84.1% |
+| close endgame | 79.3% | 92.9% | −13.6 | ≥86.1% |
+| clear endgame | 84.7% | 96.0% | −11.3 | ≥90.4% |
+| Brier (mid/close/clear) | 0.184/0.173/0.136 | 0.095/0.054/0.026 | — | ≤0.140/0.114/0.081 |
+
+Acceptance for A1 is the **A1 screen** column — at least half of each per-bucket gap closed.
+Parity with the reference is the phase target, not the screen. Below the screen, go to Task 8
+rather than to the gate: the gate costs hours, the monitors cost minutes. The screen is a
+filter, never the verdict — only `ab_match` at equal time and the 9qum match gate decide
+whether the engine actually got stronger.
 
 - [ ] **Step 3: Measure the NPS cost honestly**
 
