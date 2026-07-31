@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Guards for the 9qum -> training-bin converter.
 
-Three failure modes this catches, all of which silently poison training:
+Four failure modes this catches, all of which silently poison training:
   * a record that no longer decodes to the position it came from
   * the value stored from the wrong side's perspective (today's class of bug)
+  * a score marked valid whose sign doesn't actually match the game's outcome
   * the same game appearing in both train and val, which leaks the outcome
 
 Run: python3.12 research/data/test_convert_9qum.py
@@ -59,6 +60,22 @@ def test_value_perspective_matches_outcomes():
     assert rate >= 0.80, f"value perspective looks wrong: only {100 * rate:.1f}% agreement"
 
 
+def test_score_valid_agrees_with_outcome():
+    """MASK_SCORE means the recorded kazan diff is the true final margin (game played to
+    the stone count AND the final kazans sum to 162 -- a full sweep, nothing left on the
+    board unaccounted). Where that bit is set, score's sign and the record's own recorded
+    outcome describe the same game result, so they must agree almost always. This also
+    pins down that the bit is not simply left set on every record (the bug this guards
+    against): it must be absent often enough elsewhere, and present often enough here, for
+    a downstream consumer to actually filter on it."""
+    recs = read_records(VAL)
+    valid = [r for r in recs if r["mask"] & cv.MASK_SCORE]
+    assert len(valid) > 2000, f"expected thousands of score-valid records in val, got {len(valid)}"
+    agree = sum(1 for r in valid if (r["score"] > 0) == (r["outcome_stm"] > 0.5))
+    rate = agree / len(valid)
+    assert rate >= 0.99, f"score-valid records disagree with the outcome: only {100 * rate:.1f}%"
+
+
 def test_splits_are_disjoint_by_game():
     with open(SPLIT, encoding="utf-8") as f:
         split = json.load(f)
@@ -73,5 +90,6 @@ def test_splits_are_disjoint_by_game():
 if __name__ == "__main__":
     test_record_size_and_roundtrip()
     test_value_perspective_matches_outcomes()
+    test_score_valid_agrees_with_outcome()
     test_splits_are_disjoint_by_game()
-    print("OK: converter records, value perspective and splits (3/3)")
+    print("OK: converter records, value perspective, score validity and splits (4/4)")

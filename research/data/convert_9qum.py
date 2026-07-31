@@ -23,6 +23,16 @@ RECORD_SIZE = 68
 MASK_POLICY = 1
 MASK_VALUE_NET = 2
 MASK_VALUE_OUTCOME = 4
+# MASK_SCORE ("score valid") is set only when the recorded kazan diff is the true final
+# margin: the game was played to the stone count (`по камням`) AND the final kazans sum to
+# 162 (the whole board swept, no stones left unaccounted). Many `по камням` games actually
+# stop the instant one side passes the 82 majority threshold -- the winner is certain but
+# the remaining board stones were never allocated, so kd0 is the right SIGN but not the
+# exact final margin; measured 1,509/4,866 `по камням` games have a full sweep (ksum==162).
+# `сдача` (resignation) games never qualify: their last recorded state has `finished: False`
+# with stones still on the board (see MASK_OUTCOME_WIN below) -- score is stored for them
+# regardless (for phase-B experiments that don't need the exact margin) but the bit stays
+# clear so a consumer can filter down to the trustworthy subset.
 MASK_SCORE = 8
 # Bit 4 is outside the brief's documented 4-bit layout (bits 0-3); it persists the actual
 # recorded game outcome for the side to move. It exists because `score`'s sign is NOT a
@@ -110,7 +120,7 @@ def main():
     fh = {"train": open(os.path.join(a.out, "train.bin"), "wb"),
           "val": open(os.path.join(a.out, "val.bin"), "wb")}
     games = {"train": set(), "val": set()}
-    counts = {"train": 0, "val": 0, "net": 0, "outcome": 0, "dropped_games": 0}
+    counts = {"train": 0, "val": 0, "net": 0, "outcome": 0, "dropped_games": 0, "score_valid": 0}
 
     for g in jsonl(os.path.join(a.corpus, "games", "replays.jsonl.gz")):
         if g.get("reason") not in PLAYED_OUT or g.get("winner") not in (0, 1):
@@ -126,6 +136,8 @@ def main():
         winner = g["winner"]
         final = states[-1]
         kd0 = final["kazan"][0] - final["kazan"][1]
+        kazan_sum = final["kazan"][0] + final["kazan"][1]
+        score_valid = g.get("reason") == "по камням" and kazan_sum == 162
         cv = curves.get(gid, {})
         moves = states[0].get("moves") or []
         for ply, st in enumerate(states):
@@ -144,7 +156,9 @@ def main():
             if move is not None:
                 mask |= MASK_POLICY
             score = (kd0 if stm == 0 else -kd0) / 82.0
-            mask |= MASK_SCORE
+            if score_valid:
+                mask |= MASK_SCORE
+                counts["score_valid"] += 1
             fh[which].write(encode_record(st["pits"], st["kazan"], st["tuzdyk"], stm,
                                           move, value, score, mask, outcome_stm))
             counts[which] += 1
@@ -157,6 +171,7 @@ def main():
     print(f"train {counts['train']:,} records / {len(games['train'])} games; "
           f"val {counts['val']:,} / {len(games['val'])} games; "
           f"net-labelled {counts['net']:,}, outcome-only {counts['outcome']:,}, "
+          f"score-valid {counts['score_valid']:,}, "
           f"games dropped {counts['dropped_games']}")
 
 
