@@ -63,6 +63,17 @@ pub struct NnueNetwork {
     fc3_bias: Vec<i16>,
     fc4_weight: Vec<i16>,  // [1 * hidden3], empty if no hidden3
     fc4_bias: Vec<i16>,
+
+    // --- v2 (NNU2) ---
+    v2: bool,
+    acc_size: usize,
+    buckets: usize,
+    v2_fc1_w: Vec<f32>,   // [num_features * acc_size]
+    v2_fc1_b: Vec<f32>,   // [acc_size]
+    v2_fc2_w: Vec<f32>,   // [buckets][hidden * acc_size] flattened
+    v2_fc2_b: Vec<f32>,   // [buckets][hidden] flattened
+    v2_fc3_w: Vec<f32>,   // [buckets][hidden] flattened
+    v2_fc3_b: Vec<f32>,   // [buckets]
 }
 
 impl NnueNetwork {
@@ -74,6 +85,10 @@ impl NnueNetwork {
 
         if data.len() < 4 {
             return Err("File too small".into());
+        }
+
+        if data.len() >= 4 && u32::from_le_bytes([data[0], data[1], data[2], data[3]]) == 0x324E554E {
+            return Self::load_v2(&data);
         }
 
         let read_i16_vec = |data: &[u8], offset: &mut usize, count: usize| -> Result<Vec<i16>, String> {
@@ -129,6 +144,10 @@ impl NnueNetwork {
                     input_size, hidden1, hidden2, hidden3,
                     fc1_weight, fc1_bias, fc2_weight, fc2_bias,
                     fc3_weight, fc3_bias, fc4_weight, fc4_bias,
+                    v2: false, acc_size: 0, buckets: 0,
+                    v2_fc1_w: Vec::new(), v2_fc1_b: Vec::new(),
+                    v2_fc2_w: Vec::new(), v2_fc2_b: Vec::new(),
+                    v2_fc3_w: Vec::new(), v2_fc3_b: Vec::new(),
                 })
             } else {
                 // 3-layer with custom input_size: fc3 = hidden2→1
@@ -146,6 +165,10 @@ impl NnueNetwork {
                     input_size, hidden1, hidden2, hidden3: 0,
                     fc1_weight, fc1_bias, fc2_weight, fc2_bias,
                     fc3_weight, fc3_bias, fc4_weight: vec![], fc4_bias: vec![],
+                    v2: false, acc_size: 0, buckets: 0,
+                    v2_fc1_w: Vec::new(), v2_fc1_b: Vec::new(),
+                    v2_fc2_w: Vec::new(), v2_fc2_b: Vec::new(),
+                    v2_fc3_w: Vec::new(), v2_fc3_b: Vec::new(),
                 })
             }
         } else {
@@ -173,8 +196,103 @@ impl NnueNetwork {
                 input_size, hidden1, hidden2, hidden3: 0,
                 fc1_weight, fc1_bias, fc2_weight, fc2_bias,
                 fc3_weight, fc3_bias, fc4_weight: vec![], fc4_bias: vec![],
+                v2: false, acc_size: 0, buckets: 0,
+                v2_fc1_w: Vec::new(), v2_fc1_b: Vec::new(),
+                v2_fc2_w: Vec::new(), v2_fc2_b: Vec::new(),
+                v2_fc3_w: Vec::new(), v2_fc3_b: Vec::new(),
             })
         }
+    }
+
+    fn load_v2(data: &[u8]) -> Result<Self, String> {
+        let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]) as usize;
+        let version = rd_u16(4);
+        if version != 2 {
+            return Err(format!("unsupported NNU2 version {version}"));
+        }
+        let num_features = rd_u16(6);
+        let acc_size = rd_u16(8);
+        let hidden = rd_u16(10);
+        let buckets = rd_u16(12);
+        if num_features != NUM_FEATURES_V2 {
+            return Err(format!("expected {NUM_FEATURES_V2} features, file has {num_features}"));
+        }
+        let mut off = 16;
+        let mut take = |n: usize| -> Result<Vec<f32>, String> {
+            if off + n * 4 > data.len() {
+                return Err(format!("NNU2 truncated: need {} bytes, have {}", off + n * 4, data.len()));
+            }
+            let v = (0..n)
+                .map(|k| {
+                    let p = off + k * 4;
+                    f32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                })
+                .collect();
+            off += n * 4;
+            Ok(v)
+        };
+        let v2_fc1_w = take(num_features * acc_size)?;
+        let v2_fc1_b = take(acc_size)?;
+        let mut v2_fc2_w = Vec::new();
+        let mut v2_fc2_b = Vec::new();
+        let mut v2_fc3_w = Vec::new();
+        let mut v2_fc3_b = Vec::new();
+        for _ in 0..buckets {
+            v2_fc2_w.extend(take(acc_size * hidden)?);
+            v2_fc2_b.extend(take(hidden)?);
+            v2_fc3_w.extend(take(hidden)?);
+            v2_fc3_b.extend(take(1)?);
+        }
+        Ok(Self {
+            input_size: num_features,
+            hidden1: acc_size,
+            hidden2: hidden,
+            hidden3: 0,
+            fc1_weight: Vec::new(), fc1_bias: Vec::new(),
+            fc2_weight: Vec::new(), fc2_bias: Vec::new(),
+            fc3_weight: Vec::new(), fc3_bias: Vec::new(),
+            fc4_weight: Vec::new(), fc4_bias: Vec::new(),
+            v2: true, acc_size, buckets,
+            v2_fc1_w, v2_fc1_b, v2_fc2_w, v2_fc2_b, v2_fc3_w, v2_fc3_b,
+        })
+    }
+
+    /// Win-probability logit for the side to move.
+    ///
+    /// Meaningless (returns 0.0) when this net was loaded from a legacy weight file —
+    /// there is no v2 accumulator/bucket data to read.
+    pub fn logit_v2(&self, board: &Board) -> f32 {
+        if !self.v2 {
+            return 0.0;
+        }
+        let acc_n = self.acc_size;
+        let hidden = self.hidden2;
+        let mut acc = self.v2_fc1_b.clone();
+        for f in build_features_v2(board) {
+            let base = f as usize * acc_n;
+            for j in 0..acc_n {
+                acc[j] += self.v2_fc1_w[base + j];
+            }
+        }
+        for a in acc.iter_mut() {
+            *a = a.max(0.0);
+        }
+        let b = phase_bucket(board).min(self.buckets - 1);
+        let w2 = &self.v2_fc2_w[b * hidden * acc_n..(b + 1) * hidden * acc_n];
+        let b2 = &self.v2_fc2_b[b * hidden..(b + 1) * hidden];
+        let w3 = &self.v2_fc3_w[b * hidden..(b + 1) * hidden];
+        let mut out = self.v2_fc3_b[b];
+        for j in 0..hidden {
+            let row = &w2[j * acc_n..(j + 1) * acc_n];
+            let mut h = b2[j];
+            for i in 0..acc_n {
+                h += row[i] * acc[i];
+            }
+            if h > 0.0 {
+                out += w3[j] * h;
+            }
+        }
+        out
     }
 
     /// Build 40-input feature vector
@@ -290,6 +408,10 @@ impl NnueNetwork {
     /// Evaluate a position. Returns score from side-to-move perspective.
     #[inline]
     pub fn evaluate(&self, board: &Board) -> i32 {
+        if self.v2 {
+            let cp = (350.0 * self.logit_v2(board)).clamp(-3000.0, 3000.0);
+            return (cp * 64.0) as i32;
+        }
         let mut input_buf = [0i16; 58];
         let input: &[i16] = if self.input_size >= 58 {
             Self::build_input_58(board, &mut input_buf);
@@ -463,5 +585,64 @@ mod tests_v2 {
         assert!(f.contains(&(280 + 9)), "opp has no tuzdyk");
         assert!(f.contains(&(252 + 7)), "kazan 72 -> bucket 7");
         assert_eq!(phase_bucket(&b), 3, "18 stones on board is the last phase bucket");
+    }
+
+    /// Build a minimal v2 file in memory: one feature contributes 1.0 to accumulator 0,
+    /// bucket 0 reads accumulator 0 with weight 1.0, everything else is zero. Then the
+    /// logit for the start position is exactly the number of active features that map to
+    /// accumulator 0 — a value we can compute by hand.
+    fn synthetic_v2(num_features: usize, acc: usize, hidden: usize, buckets: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x324E554Eu32.to_le_bytes());
+        for v in [2u16, num_features as u16, acc as u16, hidden as u16, buckets as u16, 0u16] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut push_f32 = |out: &mut Vec<u8>, v: f32| out.extend_from_slice(&v.to_le_bytes());
+        for f in 0..num_features {
+            for j in 0..acc {
+                // feature 9 (me pit 0 holding 9 stones) is the only one that fires
+                push_f32(&mut out, if f == 9 && j == 0 { 1.0 } else { 0.0 });
+            }
+        }
+        for _ in 0..acc {
+            push_f32(&mut out, 0.0);
+        }
+        for b in 0..buckets {
+            for j in 0..hidden {
+                for i in 0..acc {
+                    push_f32(&mut out, if b == 0 && j == 0 && i == 0 { 1.0 } else { 0.0 });
+                }
+            }
+            for _ in 0..hidden {
+                push_f32(&mut out, 0.0);
+            }
+            for j in 0..hidden {
+                push_f32(&mut out, if b == 0 && j == 0 { 1.0 } else { 0.0 });
+            }
+            push_f32(&mut out, 0.0);
+        }
+        out
+    }
+
+    #[test]
+    fn loads_v2_and_evaluates_by_hand() {
+        let bytes = synthetic_v2(NUM_FEATURES_V2, 8, 4, NUM_BUCKETS_V2);
+        let path = std::env::temp_dir().join("nnue_v2_synthetic.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let net = NnueNetwork::load(path.to_str().unwrap()).expect("v2 file loads");
+        let b = Board::new();
+        // start position fires feature 9 once -> acc0 = 1.0 -> hidden0 = 1.0 -> logit = 1.0
+        let cp = net.evaluate(&b) / 64;
+        assert_eq!(cp, 350, "logit 1.0 must map to 350 cp, got {cp}");
+    }
+
+    #[test]
+    fn legacy_weights_still_load() {
+        // cargo test runs with CWD = the crate manifest dir (engine/), not the workspace
+        // root, so the path is relative to that.
+        let net = NnueNetwork::load("../models/engine/nnue_weights.bin")
+            .expect("the shipped legacy weights must keep loading");
+        let cp = net.evaluate(&Board::new());
+        assert!(cp.abs() < 100_000, "legacy eval returns a sane number, got {cp}");
     }
 }

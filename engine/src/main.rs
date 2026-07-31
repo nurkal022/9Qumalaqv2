@@ -228,6 +228,19 @@ fn main() {
                     }
                 }
             }
+            "evalpos" => {
+                // evalpos <weights.bin> <pos>  -> logit and cp, for the torch/Rust equality test
+                let w = args.get(2).map(|s| s.as_str()).unwrap_or("");
+                let pos = args.get(3).map(|s| s.as_str()).unwrap_or("");
+                let net = match NnueNetwork::load(w) {
+                    Ok(n) => n,
+                    Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
+                };
+                match board::parse_position(pos) {
+                    Ok(b) => println!("logit {:.6} cp {}", net.logit_v2(&b), net.evaluate(&b) / 64),
+                    Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
+                }
+            }
             "serve" => run_serve(),
             _ => print_usage(),
         }
