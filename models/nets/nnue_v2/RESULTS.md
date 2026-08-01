@@ -252,3 +252,33 @@ accurate and still not win a game.
 λ · predicted_final_margin` — using the score head, whose targets already exist in the
 training records (201,048 records carry a trustworthy final margin). That work is `NNU2`
 version 4.
+
+## The paired gate, and why every cross-session number is void
+
+Run back-to-back on 2026-08-02 (23:58–03:58), one code path, the same 12-opening suite played
+from both colours, 24 counted games each, zero void, zero board recoveries:
+
+| engine | vs 9qum's net |
+|---|---|
+| production baseline | 3W-0D-21L = **12.5%** |
+| `v2_e12_acc256` | 3W-0D-21L = **12.5%** |
+
+Verified independent rather than a duplicated log: 24 distinct game ids per run, zero overlap,
+and all 24 matching opening+seat pairs carry different move records. The identical score is a
+coincidence of two engines of similar strength against this opponent.
+
+**Two conclusions.**
+
+1. `acc256`'s +220 Elo over our own baseline produced **no** external gain. It is better than
+   the baseline by every offline measure (and beats the 9qum reference in the midgame), it wins
+   78% head-to-head against the baseline — and against an independent opponent the two are
+   indistinguishable. This is the trap this project documented in June, met again with a fuller
+   set of corroborating offline numbers, which is what makes it dangerous.
+2. Their net is harder now than when the baseline scored 31.2% on this same suite; their
+   level-I config moved from `mix 0.22, drop 0.12` to `mix 0.5, drop 0.25` in between
+   (correlation, not established causation). **Cross-session comparisons against their API are
+   therefore void.** Only pairs measured in the same window count, and the earlier 31.2% /
+   27.5% figures are history, not references.
+
+The corollary is that `acc256`'s apparent collapse (0/9, then 6.2%) was never evidence against
+it: in the same window the production engine scores the same 12.5%.
