@@ -26,6 +26,7 @@ import features_v2 as fv
 RECORD_SIZE = 68
 MASK_VALUE_NET = 2
 MASK_VALUE_OUTCOME = 4
+MASK_SCORE = 8  # bit 3: the record's `score` field (final kazan diff / 82) is trustworthy
 NUM_FEATURES = fv.NUM_FEATURES
 ACC = 1024
 HIDDEN = 32
@@ -33,21 +34,36 @@ BUCKETS = fv.NUM_BUCKETS
 
 
 class NnueV2(nn.Module):
-    def __init__(self, num_features=NUM_FEATURES, acc=ACC, hidden=HIDDEN, buckets=BUCKETS):
+    def __init__(self, num_features=NUM_FEATURES, acc=ACC, hidden=HIDDEN, buckets=BUCKETS,
+                 score_head=False):
         super().__init__()
         self.acc, self.hidden, self.buckets = acc, hidden, buckets
+        self.score_head = score_head
         self.emb = nn.EmbeddingBag(num_features, acc, mode="sum")
         self.acc_bias = nn.Parameter(torch.zeros(acc))
         self.fc2 = nn.ModuleList([nn.Linear(acc, hidden) for _ in range(buckets)])
         self.fc3 = nn.ModuleList([nn.Linear(hidden, 1) for _ in range(buckets)])
+        if score_head:
+            # Auxiliary only (task 12, lever 1): predicts the record's normalised final
+            # kazan-difference `score`, trained jointly with the value head so the shared
+            # emb/fc2 representation also has to explain the exact margin, not just win/loss.
+            # NEVER read by export_nnu2/export_nnu2_v3 (they only ever serialise
+            # emb/acc_bias/fc2/fc3) and therefore never reaches the engine's NNU2 loader.
+            self.fc_score = nn.ModuleList([nn.Linear(hidden, 1) for _ in range(buckets)])
 
-    def forward(self, feats, offsets, bucket):
+    def forward(self, feats, offsets, bucket, return_score=False):
         a = torch.relu(self.emb(feats, offsets) + self.acc_bias)
         out = torch.zeros(a.shape[0], device=a.device)
+        score_out = torch.zeros(a.shape[0], device=a.device) if return_score else None
         for b in range(self.buckets):
             m = bucket == b
             if m.any():
-                out[m] = self.fc3[b](torch.relu(self.fc2[b](a[m]))).squeeze(-1)
+                h = torch.relu(self.fc2[b](a[m]))
+                out[m] = self.fc3[b](h).squeeze(-1)
+                if return_score:
+                    score_out[m] = self.fc_score[b](h).squeeze(-1)
+        if return_score:
+            return out, score_out
         return out
 
     def forward_single(self, feature_indices, bucket):
@@ -151,11 +167,44 @@ def load_bin(path):
     tuz = r[:, 20:22].view(np.int8).astype(np.int64)
     stm = r[:, 22].astype(np.int64)
     value = r[:, 59:63].copy().view(np.float32).ravel()
+    score = r[:, 63:67].copy().view(np.float32).ravel()
     mask = r[:, 67]
-    return pits, kazan, tuz, stm, value, mask
+    return pits, kazan, tuz, stm, value, score, mask
 
 
-def build_feature_matrix(pits, kazan, tuz, stm):
+def phase_from_total(total, buckets=BUCKETS):
+    """Descending phase-bucket assignment from the total stones still on the board
+    (0..162: 18 pits x 9 stones at the opening, both kazans start at 0).
+
+    buckets == BUCKETS (4) is the canonical, EXPORTED, playable mapping -- thresholds
+    121/81/41, bit-identical to features_v2.phase_bucket() and to
+    engine/src/nnue.rs::phase_bucket(); test_nnue_v2_export.py checks this against the
+    scalar Python implementation.
+
+    Any other value is a TRAINING-ONLY refinement (task 12, lever 2): each of the 4
+    canonical ranges is split into buckets/BUCKETS equal-width sub-ranges by total stone
+    count (more stones -> lower sub-index), so e.g. buckets=8 doubles resolution inside
+    each existing range without moving its outer edges. This mapping must NEVER be
+    exported as an NNU2 file: engine/src/nnue.rs::phase_bucket() only ever returns 0..3
+    (`.min(self.buckets - 1)` at the call site does not change this), so a >4-bucket
+    file would have most of its extra heads unreachable at play time, and the reachable
+    ones would disagree with the boundaries used here. See the --buckets help text.
+    """
+    if buckets == BUCKETS:
+        return np.where(total >= 121, 0, np.where(total >= 81, 1, np.where(total >= 41, 2, 3)))
+    if buckets < BUCKETS or buckets % BUCKETS != 0:
+        raise ValueError(f"--buckets {buckets} must be a positive multiple of {BUCKETS} "
+                          f"(each canonical range is split into buckets/{BUCKETS} sub-ranges)")
+    sub = buckets // BUCKETS
+    parent = np.where(total >= 121, 0, np.where(total >= 81, 1, np.where(total >= 41, 2, 3)))
+    lo = np.select([parent == 0, parent == 1, parent == 2, parent == 3], [121, 81, 41, 0])
+    hi = np.select([parent == 0, parent == 1, parent == 2, parent == 3], [163, 121, 81, 41])
+    width = np.maximum((hi - lo) / sub, 1e-9)
+    sidx = np.clip(np.floor((hi - 1 - total) / width).astype(np.int64), 0, sub - 1)
+    return parent * sub + sidx
+
+
+def build_feature_matrix(pits, kazan, tuz, stm, buckets=BUCKETS):
     """Vectorised mirror of features_v2.build_features; test_features_v2.py owns correctness
     of the layout, this only has to agree with it."""
     n = pits.shape[0]
@@ -176,7 +225,7 @@ def build_feature_matrix(pits, kazan, tuz, stm):
     feats[:, 21] = 280 + tz[ar, opp]
     total = pits.sum(axis=1)
     feats[:, 22] = 290 + (total % 2)
-    phase = np.where(total >= 121, 0, np.where(total >= 81, 1, np.where(total >= 41, 2, 3)))
+    phase = phase_from_total(total, buckets)
     return feats, phase
 
 
@@ -191,14 +240,46 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--w-net", type=float, default=1.0, help="weight of 9qum-labelled records")
     ap.add_argument("--w-outcome", type=float, default=0.3, help="weight of outcome-only records")
+    ap.add_argument("--acc", type=int, default=ACC,
+                     help="accumulator width (first-layer/EmbeddingBag output size); "
+                          "the fc2 dot product costs acc*hidden MACs, so this is the main "
+                          "eval-speed knob (task 9b: narrower acc, same recipe, to see "
+                          "whether the close-endgame accuracy gain survives shrinking "
+                          "the accumulator back toward legacy speed)")
+    ap.add_argument("--w-score", type=float, default=0.0,
+                     help="task 12 lever 1: weight of an AUXILIARY score-prediction loss. "
+                          "When > 0, adds a second head (hidden -> 1) per bucket that predicts "
+                          "the record's normalised final-kazan-difference `score` field "
+                          "(bytes 63..67), trained with mask-bit-3-gated MSE (unmasked "
+                          "records contribute exactly zero score gradient) and added to the "
+                          "value BCE loss as total = value_bce + w_score * score_mse. The "
+                          "score head is NEVER exported: export_nnu2/export_nnu2_v3 only "
+                          "ever serialise emb/acc_bias/fc2/fc3, so the exported NNU2 file and "
+                          "the engine's forward pass are byte-for-byte unchanged; this only "
+                          "shapes the shared representation during training. The printed "
+                          "epoch loss and the best-checkpoint criterion are always the "
+                          "value-only val loss, so runs with different --w-score stay "
+                          "comparable on the same quantity.")
+    ap.add_argument("--buckets", type=int, default=BUCKETS,
+                     help="task 12 lever 2: number of phase buckets. The default (4, "
+                          "BUCKETS) is the canonical, PLAYABLE mapping the engine's own "
+                          "phase_bucket() implements. Any other value (must be a positive "
+                          "multiple of 4, e.g. 8) is a TRAINING-ONLY refinement -- see "
+                          "phase_from_total()'s docstring. Such a run's automatic .bin export "
+                          "is SKIPPED (only the .pt checkpoint is written): "
+                          "engine/src/nnue.rs::phase_bucket() only ever returns 0..3, so a "
+                          ">4-bucket NNU2 file would be silently mis-read at play time. Use "
+                          "this only to compare val loss; never deploy its .bin.")
     ap.add_argument("--quantize-only", metavar="PT_PATH", default=None,
                      help="skip training: load a .pt checkpoint (e.g. an already-trained "
                           "v2_e12.pt) and export it as version-3 (i16 quantised) NNU2 to "
-                          "PT_PATH with '.pt' replaced by '_v3.bin', then exit")
+                          "PT_PATH with '.pt' replaced by '_v3.bin', then exit. Pass the "
+                          "same --acc used to train that checkpoint (default 1024) so the "
+                          "freshly constructed model's shape matches the saved state_dict.")
     a = ap.parse_args()
 
     if a.quantize_only:
-        model = NnueV2()
+        model = NnueV2(acc=a.acc)
         model.load_state_dict(torch.load(a.quantize_only, map_location="cpu"))
         model.eval()
         out_path = os.path.splitext(a.quantize_only)[0] + "_v3.bin"
@@ -210,23 +291,24 @@ def main():
         return
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    model = NnueV2().to(dev)
+    model = NnueV2(acc=a.acc, buckets=a.buckets, score_head=(a.w_score > 0)).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr)
     lossf = nn.BCEWithLogitsLoss(reduction="none")
 
     def prep(path):
-        pits, kazan, tuz, stm, value, mask = load_bin(path)
-        feats, phase = build_feature_matrix(pits, kazan, tuz, stm)
+        pits, kazan, tuz, stm, value, score, mask = load_bin(path)
+        feats, phase = build_feature_matrix(pits, kazan, tuz, stm, buckets=a.buckets)
         w = np.where(mask & MASK_VALUE_NET, a.w_net, a.w_outcome).astype(np.float32)
+        score_mask = ((mask & MASK_SCORE) != 0).astype(np.float32)
         return (torch.tensor(feats), torch.tensor(phase), torch.tensor(value),
-                torch.tensor(w))
+                torch.tensor(w), torch.tensor(score), torch.tensor(score_mask))
 
     tr = prep(a.train)
     va = prep(a.val)
     print(f"train {tr[0].shape[0]:,} records, val {va[0].shape[0]:,}")
 
     def run_epoch(data, train):
-        feats, phase, value, w = data
+        feats, phase, value, w, score, score_mask = data
         n = feats.shape[0]
         order = torch.randperm(n) if train else torch.arange(n)
         tot = cnt = 0.0
@@ -235,14 +317,27 @@ def main():
             idx = order[s: s + a.batch]
             fb = feats[idx].to(dev)
             offs = torch.arange(0, fb.shape[0] * 23, 23, device=dev)
-            out = model(fb.reshape(-1), offs, phase[idx].to(dev))
-            l = lossf(out, value[idx].to(dev)) * w[idx].to(dev)
-            l = l.mean()
+            bkt = phase[idx].to(dev)
+            if a.w_score > 0:
+                out, score_pred = model(fb.reshape(-1), offs, bkt, return_score=True)
+            else:
+                out = model(fb.reshape(-1), offs, bkt)
+            value_loss = (lossf(out, value[idx].to(dev)) * w[idx].to(dev)).mean()
+            if a.w_score > 0:
+                sm = score_mask[idx].to(dev)
+                se = (score_pred - score[idx].to(dev)).pow(2) * sm
+                denom = sm.sum().clamp(min=1.0)
+                score_loss = se.sum() / denom
+                loss = value_loss + a.w_score * score_loss
+            else:
+                loss = value_loss
             if train:
                 opt.zero_grad()
-                l.backward()
+                loss.backward()
                 opt.step()
-            tot += l.item() * idx.numel()
+            # Always accumulate the VALUE-only loss: the score term is an auxiliary
+            # training signal, not part of the reported/compared quantity (task 12).
+            tot += value_loss.item() * idx.numel()
             cnt += idx.numel()
         return tot / cnt
 
@@ -256,8 +351,13 @@ def main():
         if val < best:
             best = val
             torch.save(model.state_dict(), os.path.join(a.out, f"{a.name}.pt"))
-            export_nnu2(model, os.path.join(a.out, f"{a.name}.bin"))
-            print(f"  saved {a.name}.bin (val {val:.4f})")
+            if model.buckets == BUCKETS:
+                export_nnu2(model, os.path.join(a.out, f"{a.name}.bin"))
+                print(f"  saved {a.name}.bin (val {val:.4f})")
+            else:
+                print(f"  saved {a.name}.pt only (val {val:.4f}) -- buckets={model.buckets} "
+                      f"!= {BUCKETS}: NOT exporting an NNU2 .bin, it would be silently "
+                      f"mis-read at play time (see --buckets help)")
     print(f"best val loss {best:.4f}")
 
 
