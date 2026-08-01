@@ -158,6 +158,66 @@ def export_nnu2_v3(model, path):
     return {"scale_l1": scale_l1, "scale_fc2": scale_fc2, "scale_fc3": scale_fc3}
 
 
+def export_nnu2_v4(model, path):
+    """Version-4 NNU2 writer (task 13): identical layout to export_nnu2_v3 (i16,
+    per-tensor f32 scales) through the value head, plus an auxiliary score head
+    appended to the scale section and to each bucket's weight block, so the engine can
+    blend a win-probability term with a predicted-final-margin term
+    (engine/src/nnue.rs::NnueNetwork::evaluate, version-4 branch). Requires
+    `model.score_head` (the `fc_score` ModuleList built by `NnueV2(..., score_head=True)`
+    / trained with `--w-score > 0`).
+
+    Byte layout (must mirror engine/src/nnue.rs::NnueNetwork::load_nnu2_v4 field-for-field):
+      u32 magic, u16 version(=4), u16 num_features, u16 acc, u16 hidden, u16 buckets, u16 pad
+      f32 scale_l1
+      per bucket: f32 scale_fc2[b], f32 scale_fc3[b], f32 scale_score[b]
+      i16 fc1_w[num_features*acc]  (feature-major, same order as export_nnu2/_v3)
+      i16 fc1_b[acc]
+      per bucket: i16 fc2_w[acc*hidden], i16 fc2_b[hidden], i16 fc3_w[hidden], i16 fc3_b[1],
+                  i16 score_w[hidden], i16 score_b[1]
+    """
+    if not getattr(model, "score_head", False):
+        raise ValueError(
+            "export_nnu2_v4 requires a model built with score_head=True and trained "
+            "with --w-score > 0 (no fc_score submodule found)"
+        )
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    emb = model.emb.weight.detach().cpu().numpy().astype(np.float32)
+    bias = model.acc_bias.detach().cpu().numpy().astype(np.float32)
+    scale_l1 = _pick_scale(emb, bias)
+
+    fc2w = [model.fc2[b].weight.detach().cpu().numpy().astype(np.float32) for b in range(model.buckets)]
+    fc2b = [model.fc2[b].bias.detach().cpu().numpy().astype(np.float32) for b in range(model.buckets)]
+    fc3w = [model.fc3[b].weight.detach().cpu().numpy().astype(np.float32).ravel() for b in range(model.buckets)]
+    fc3b = [model.fc3[b].bias.detach().cpu().numpy().astype(np.float32) for b in range(model.buckets)]
+    scorew = [model.fc_score[b].weight.detach().cpu().numpy().astype(np.float32).ravel() for b in range(model.buckets)]
+    scoreb = [model.fc_score[b].bias.detach().cpu().numpy().astype(np.float32) for b in range(model.buckets)]
+
+    scale_fc2 = [_pick_scale(fc2w[b], fc2b[b]) for b in range(model.buckets)]
+    scale_fc3 = [_pick_scale(fc3w[b], fc3b[b]) for b in range(model.buckets)]
+    scale_score = [_pick_scale(scorew[b], scoreb[b]) for b in range(model.buckets)]
+
+    with open(path, "wb") as f:
+        f.write(struct.pack("<I", 0x324E554E))
+        f.write(struct.pack("<6H", 4, NUM_FEATURES, model.acc, model.hidden, model.buckets, 0))
+        f.write(struct.pack("<f", scale_l1))
+        for b in range(model.buckets):
+            f.write(struct.pack("<fff", scale_fc2[b], scale_fc3[b], scale_score[b]))
+        f.write(_quantise(emb, scale_l1).tobytes())
+        f.write(_quantise(bias, scale_l1).tobytes())
+        for b in range(model.buckets):
+            f.write(_quantise(fc2w[b], scale_fc2[b]).tobytes())
+            f.write(_quantise(fc2b[b], scale_fc2[b]).tobytes())
+            f.write(_quantise(fc3w[b], scale_fc3[b]).tobytes())
+            f.write(_quantise(fc3b[b], scale_fc3[b]).tobytes())
+            f.write(_quantise(scorew[b], scale_score[b]).tobytes())
+            f.write(_quantise(scoreb[b], scale_score[b]).tobytes())
+    return {
+        "scale_l1": scale_l1, "scale_fc2": scale_fc2, "scale_fc3": scale_fc3,
+        "scale_score": scale_score,
+    }
+
+
 def load_bin(path):
     raw = np.fromfile(path, dtype=np.uint8)
     n = len(raw) // RECORD_SIZE
@@ -276,6 +336,12 @@ def main():
                           "PT_PATH with '.pt' replaced by '_v3.bin', then exit. Pass the "
                           "same --acc used to train that checkpoint (default 1024) so the "
                           "freshly constructed model's shape matches the saved state_dict.")
+    ap.add_argument("--export-v4", metavar="PT_PATH", default=None,
+                     help="skip training: load a .pt checkpoint trained with --w-score > 0 "
+                          "(so it has an fc_score head) and export it as version-4 (i16 "
+                          "quantised value head + auxiliary score head, task 13) NNU2 to "
+                          "PT_PATH with '.pt' replaced by '_v4.bin', then exit. Pass the "
+                          "same --acc used to train that checkpoint, as with --quantize-only.")
     a = ap.parse_args()
 
     if a.quantize_only:
@@ -288,6 +354,25 @@ def main():
         print(f"  scale_l1={scales['scale_l1']}")
         print(f"  scale_fc2={scales['scale_fc2']}")
         print(f"  scale_fc3={scales['scale_fc3']}")
+        return
+
+    if a.export_v4:
+        model = NnueV2(acc=a.acc, score_head=True)
+        state = torch.load(a.export_v4, map_location="cpu")
+        if "fc_score.0.weight" not in state:
+            raise SystemExit(
+                f"{a.export_v4} has no score head (fc_score.*) in its state dict -- "
+                "retrain with --w-score > 0 before exporting a version-4 net"
+            )
+        model.load_state_dict(state)
+        model.eval()
+        out_path = os.path.splitext(a.export_v4)[0] + "_v4.bin"
+        scales = export_nnu2_v4(model, out_path)
+        print(f"wrote {out_path}")
+        print(f"  scale_l1={scales['scale_l1']}")
+        print(f"  scale_fc2={scales['scale_fc2']}")
+        print(f"  scale_fc3={scales['scale_fc3']}")
+        print(f"  scale_score={scales['scale_score']}")
         return
 
     dev = "cuda" if torch.cuda.is_available() else "cpu"

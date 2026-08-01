@@ -151,3 +151,6 @@ tools/playok/analysis/losses/
 tools/playok/analysis/draws/
 tools/playok/__pycache__/
 runs/
+
+# test engines built beside candidate weights (large binaries, rebuildable)
+models/nets/nnue_v2/eng_*/

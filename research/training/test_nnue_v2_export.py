@@ -19,6 +19,7 @@ import train_nnue_v2 as tn
 
 ENGINE = "target/release/togyzkumalaq-engine"
 TMP = "/tmp/nnue_v2_equality.bin"
+TMP_V4 = "/tmp/nnue_v2_v4_equality.bin"
 
 POSITIONS = [
     ([9] * 18, [0, 0], [None, None], 0),
@@ -47,6 +48,35 @@ def test_vectorised_features_match_scalar():
     print(f"OK: vectorised and scalar feature builders agree on {len(POSITIONS)} rows")
 
 
+def test_v4_export_roundtrip():
+    """Same idea as the version-2 (f32) check in main(), but for the version-4 export
+    (task 13): a model trained with score_head=True must export a version-4 NNU2 file
+    whose VALUE-head logit -- as read back through the engine's `evalpos` (the same
+    entry point `evaluate()`/search actually use, exercising `load_nnu2_v4` and
+    `logit_v4` end to end, not just the exporter in isolation) -- still agrees with
+    torch within 1e-3, on the same 4 positions and with the same method as the
+    version-2 check. (`forward_single` returns only the value head regardless of
+    score_head, so no changes to it were needed to reuse it here.)"""
+    torch.manual_seed(0)
+    model = tn.NnueV2(acc=256, score_head=True)
+    model.eval()
+    tn.export_nnu2_v4(model, TMP_V4)
+    worst = 0.0
+    for pits, kazan, tuz, stm in POSITIONS:
+        feats = fv.build_features(pits, kazan, tuz, stm)
+        bucket = fv.phase_bucket(pits)
+        with torch.no_grad():
+            want = model.forward_single(feats, bucket).item()
+        pos = fv.pos_string(pits, kazan, tuz, stm)
+        out = subprocess.run([ENGINE, "evalpos", TMP_V4, pos],
+                             capture_output=True, text=True, check=True)
+        got = float(out.stdout.split()[1])
+        worst = max(worst, abs(want - got))
+        assert abs(want - got) < 1e-3, f"{pos}: torch {want:.6f} vs rust (v4) {got:.6f}"
+    print(f"OK: v4 (i16 value head + score head) torch and Rust agree on "
+          f"{len(POSITIONS)} positions (max diff {worst:.2e})")
+
+
 def main():
     test_vectorised_features_match_scalar()
     torch.manual_seed(0)
@@ -66,6 +96,8 @@ def main():
         worst = max(worst, abs(want - got))
         assert abs(want - got) < 1e-3, f"{pos}: torch {want:.6f} vs rust {got:.6f}"
     print(f"OK: torch and Rust agree on {len(POSITIONS)} positions (max diff {worst:.2e})")
+
+    test_v4_export_roundtrip()
 
 
 if __name__ == "__main__":

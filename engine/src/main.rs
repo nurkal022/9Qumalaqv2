@@ -237,7 +237,18 @@ fn main() {
                     Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
                 };
                 match board::parse_position(pos) {
-                    Ok(b) => println!("logit {:.6} cp {}", net.logit_v2(&b), net.evaluate(&b) / 64),
+                    Ok(b) => {
+                        let logit = net.logit_v2(&b);
+                        let cp = net.evaluate(&b) / 64;
+                        // version-4 nets also carry an auxiliary margin prediction
+                        // (task 13); print it when present, for the torch/Rust value
+                        // round-trip test (stdout field 1 is unchanged either way) and
+                        // for manual sanity checks of the blend.
+                        match net.margin_v4(&b) {
+                            Some(margin) => println!("logit {:.6} margin {:.6} cp {}", logit, margin, cp),
+                            None => println!("logit {:.6} cp {}", logit, cp),
+                        }
+                    }
                     Err(e) => { eprintln!("error: {e}"); std::process::exit(2); }
                 }
             }

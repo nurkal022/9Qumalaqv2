@@ -6,7 +6,10 @@
 use crate::board::{Board, NUM_PITS};
 
 /// Evaluation weights — Texel-tuned from 77K PlayOK positions (44% error reduction)
-const MATERIAL_WEIGHT: i32 = 21;
+/// `pub(crate)`: this is also the legacy eval's per-stone (kazan-difference) centipawn
+/// weight, referenced by `nnue.rs`'s NNU2 v4 margin blend (`STONE_CP`) so the two stay
+/// in lockstep instead of duplicating the magic number.
+pub(crate) const MATERIAL_WEIGHT: i32 = 21;
 /// Position-specific tuzdyk values from PlayOK 533K game winrate analysis
 /// Pit7=62.2%, Pit5=60.1%, Pit6=58.5%, Pit4=55.2%, Pit2=53.1%, Pit3=52.0%, Pit8=51.5%, Pit1=50.3%
 const TUZDYK_VALUE: [i32; 9] = [350, 420, 400, 450, 550, 530, 560, 380, 0];

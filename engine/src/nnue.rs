@@ -92,6 +92,12 @@ pub struct NnueNetwork {
     v3_scale_l1: f32,
     v3_scale_fc2: Vec<f32>,  // [buckets]
     v3_scale_fc3: Vec<f32>,  // [buckets]
+
+    // --- NNU2 version 4 (i16, quantised value head — identical to version 3 — plus an
+    // auxiliary score head; see `logit_v4` / task-13-report.md). Empty for version 2/3.
+    v4_score_w: Vec<i16>,     // [buckets][hidden] flattened
+    v4_score_b: Vec<i16>,     // [buckets]
+    v4_scale_score: Vec<f32>, // [buckets]
 }
 
 impl NnueNetwork {
@@ -229,6 +235,7 @@ impl NnueNetwork {
         match version {
             2 => Self::load_nnu2_f32(data),
             3 => Self::load_nnu2_i16(data),
+            4 => Self::load_nnu2_v4(data),
             v => Err(format!("unsupported NNU2 version {v}")),
         }
     }
@@ -296,9 +303,16 @@ impl NnueNetwork {
         if num_features != NUM_FEATURES_V2 {
             return Err(format!("expected {NUM_FEATURES_V2} features, file has {num_features}"));
         }
-        if acc_size != ACC_SIZE_V2 || hidden != HIDDEN_V2 {
+        // `acc_size` is the one axis task 9b's speed experiment varies (1024 -> 256/512),
+        // so it's checked as an upper bound, not an exact match: `logit_v3`'s first
+        // accumulator buffer is a fixed-size `[_; ACC_SIZE_V2]` stack array sized to the
+        // *widest* net this format supports, and is used only up to the file's own
+        // `acc_size` (see `logit_v3`), so any acc_size <= ACC_SIZE_V2 is safe to load.
+        // `hidden` is NOT parametrised the same way (the second stack buffer is fixed at
+        // exactly HIDDEN_V2) since no experiment varies it, so it must still match exactly.
+        if acc_size > ACC_SIZE_V2 || hidden != HIDDEN_V2 {
             return Err(format!(
-                "NNU2 v3 expects acc_size={ACC_SIZE_V2} hidden={HIDDEN_V2}, file has {acc_size}/{hidden}"
+                "NNU2 v3 expects acc_size<={ACC_SIZE_V2} hidden={HIDDEN_V2}, file has {acc_size}/{hidden}"
             ));
         }
 
@@ -361,6 +375,107 @@ impl NnueNetwork {
         })
     }
 
+    /// NNU2 version 4 (task 13): identical to version 3 (i16, per-tensor f32 scale
+    /// factors, same fc1/fc2/fc3 shapes and byte order) through the value head, plus an
+    /// auxiliary score head appended to the scale section and to each bucket's weight
+    /// block. The score head predicts the normalised final-margin target the training
+    /// corpus carries at record bytes 63..67 (see research/training/train_nnue_v2.py's
+    /// `--w-score` and `export_nnu2_v4`), so search can be given a margin-growing
+    /// incentive in addition to the win-probability logit (see `logit_v4`/`evaluate`).
+    ///
+    /// Byte layout (see export_nnu2_v4 in train_nnue_v2.py, which this must mirror
+    /// field-for-field):
+    ///   u32 magic, u16 version(=4), u16 num_features, u16 acc, u16 hidden, u16 buckets, u16 pad
+    ///   f32 scale_l1
+    ///   per bucket: f32 scale_fc2[b], f32 scale_fc3[b], f32 scale_score[b]
+    ///   i16 fc1_w[num_features*acc]  (feature-major, same order as version 2/3)
+    ///   i16 fc1_b[acc]
+    ///   per bucket: i16 fc2_w[acc*hidden], i16 fc2_b[hidden], i16 fc3_w[hidden], i16 fc3_b[1],
+    ///               i16 score_w[hidden], i16 score_b[1]
+    fn load_nnu2_v4(data: &[u8]) -> Result<Self, String> {
+        let rd_u16 = |off: usize| u16::from_le_bytes([data[off], data[off + 1]]) as usize;
+        let num_features = rd_u16(6);
+        let acc_size = rd_u16(8);
+        let hidden = rd_u16(10);
+        let buckets = rd_u16(12);
+        if num_features != NUM_FEATURES_V2 {
+            return Err(format!("expected {NUM_FEATURES_V2} features, file has {num_features}"));
+        }
+        // Same acc_size/hidden contract as version 3 (see load_nnu2_i16's comment):
+        // acc_size is a "up to the fixed stack-buffer capacity" bound, hidden must match
+        // exactly because logit_v4 shares the same fixed-size stack buffers.
+        if acc_size > ACC_SIZE_V2 || hidden != HIDDEN_V2 {
+            return Err(format!(
+                "NNU2 v4 expects acc_size<={ACC_SIZE_V2} hidden={HIDDEN_V2}, file has {acc_size}/{hidden}"
+            ));
+        }
+
+        let mut off = 16;
+        let mut take_f32 = |n: usize| -> Result<Vec<f32>, String> {
+            if off + n * 4 > data.len() {
+                return Err(format!("NNU2 v4 truncated (scale section): need {} bytes, have {}", off + n * 4, data.len()));
+            }
+            let v = (0..n)
+                .map(|k| {
+                    let p = off + k * 4;
+                    f32::from_le_bytes([data[p], data[p + 1], data[p + 2], data[p + 3]])
+                })
+                .collect();
+            off += n * 4;
+            Ok(v)
+        };
+        let scale_l1 = take_f32(1)?[0];
+        let mut scale_fc2 = Vec::with_capacity(buckets);
+        let mut scale_fc3 = Vec::with_capacity(buckets);
+        let mut scale_score = Vec::with_capacity(buckets);
+        for _ in 0..buckets {
+            scale_fc2.push(take_f32(1)?[0]);
+            scale_fc3.push(take_f32(1)?[0]);
+            scale_score.push(take_f32(1)?[0]);
+        }
+
+        let mut take_i16 = |n: usize| -> Result<Vec<i16>, String> {
+            if off + n * 2 > data.len() {
+                return Err(format!("NNU2 v4 truncated (weights): need {} bytes, have {}", off + n * 2, data.len()));
+            }
+            let v = (0..n)
+                .map(|k| {
+                    let p = off + k * 2;
+                    i16::from_le_bytes([data[p], data[p + 1]])
+                })
+                .collect();
+            off += n * 2;
+            Ok(v)
+        };
+        let v3_fc1_w = take_i16(num_features * acc_size)?;
+        let v3_fc1_b = take_i16(acc_size)?;
+        let mut v3_fc2_w = Vec::new();
+        let mut v3_fc2_b = Vec::new();
+        let mut v3_fc3_w = Vec::new();
+        let mut v3_fc3_b = Vec::new();
+        let mut v4_score_w = Vec::new();
+        let mut v4_score_b = Vec::new();
+        for _ in 0..buckets {
+            v3_fc2_w.extend(take_i16(acc_size * hidden)?);
+            v3_fc2_b.extend(take_i16(hidden)?);
+            v3_fc3_w.extend(take_i16(hidden)?);
+            v3_fc3_b.extend(take_i16(1)?);
+            v4_score_w.extend(take_i16(hidden)?);
+            v4_score_b.extend(take_i16(1)?);
+        }
+        Ok(Self {
+            input_size: num_features,
+            hidden1: acc_size,
+            hidden2: hidden,
+            nnu2_version: 4,
+            v2: true, acc_size, buckets,
+            v3_fc1_w, v3_fc1_b, v3_fc2_w, v3_fc2_b, v3_fc3_w, v3_fc3_b,
+            v3_scale_l1: scale_l1, v3_scale_fc2: scale_fc2, v3_scale_fc3: scale_fc3,
+            v4_score_w, v4_score_b, v4_scale_score: scale_score,
+            ..Default::default()
+        })
+    }
+
     /// Win-probability logit for the side to move.
     ///
     /// Meaningless (returns 0.0) when this net was loaded from a legacy weight file —
@@ -371,6 +486,9 @@ impl NnueNetwork {
         }
         if self.nnu2_version == 3 {
             return self.logit_v3(board);
+        }
+        if self.nnu2_version == 4 {
+            return self.logit_v4(board).0;
         }
         let acc_n = self.acc_size;
         let hidden = self.hidden2;
@@ -427,11 +545,16 @@ impl NnueNetwork {
     fn logit_v3(&self, board: &Board) -> f32 {
         let acc_n = self.acc_size;
         let hidden = self.hidden2;
-        debug_assert_eq!(acc_n, ACC_SIZE_V2);
+        // acc_n may be < ACC_SIZE_V2 (task 9b: 256/512-wide experiment nets) — the stack
+        // buffer below is sized to the format's maximum and only the first acc_n slots
+        // are ever written or read, so a narrower net does correspondingly less work
+        // (see `load_nnu2_i16`'s acc_size<=ACC_SIZE_V2 check). hidden is not parametrised
+        // the same way and must still be exactly HIDDEN_V2.
+        debug_assert!(acc_n <= ACC_SIZE_V2);
         debug_assert_eq!(hidden, HIDDEN_V2);
 
         let mut acc = [0i32; ACC_SIZE_V2];
-        for (a, &b) in acc.iter_mut().zip(self.v3_fc1_b.iter()) {
+        for (a, &b) in acc[..acc_n].iter_mut().zip(self.v3_fc1_b.iter()) {
             *a = b as i32;
         }
         for f in build_features_v2_arr(board) {
@@ -442,11 +565,11 @@ impl NnueNetwork {
             // hot loop was small (~1-2%, see task-9-report.md) — kept for the (untested
             // here) codegen on other targets/compiler versions, not because it moved
             // the NPS numbers reported for this task.
-            for (a, &w) in acc.iter_mut().zip(row.iter()) {
+            for (a, &w) in acc[..acc_n].iter_mut().zip(row.iter()) {
                 *a += w as i32;
             }
         }
-        for a in acc.iter_mut() {
+        for a in acc[..acc_n].iter_mut() {
             if *a < 0 {
                 *a = 0;
             }
@@ -470,7 +593,7 @@ impl NnueNetwork {
         for j in 0..hidden {
             let row = &w2[j * acc_n..(j + 1) * acc_n];
             let mut sum: i64 = b2[j] as i64 * s1_i64;
-            for (&w, &a) in row.iter().zip(acc.iter()) {
+            for (&w, &a) in row.iter().zip(acc[..acc_n].iter()) {
                 sum += w as i64 * a as i64;
             }
             h[j] = sum.max(0);
@@ -484,6 +607,99 @@ impl NnueNetwork {
         }
         let denom = s1 as f64 * s2 as f64 * s3 as f64;
         (out as f64 / denom) as f32
+    }
+
+    /// NNU2 version 4 forward pass (task 13): shares the exact accumulator/hidden-layer
+    /// computation with `logit_v3` (see its doc comment for the integer-arithmetic
+    /// rationale) but reads the shared per-bucket hidden activation `h` through *two*
+    /// output projections instead of one — the value head (byte-identical math to
+    /// `logit_v3`) and an auxiliary score head, exactly mirroring
+    /// `NnueV2.forward(..., return_score=True)` in train_nnue_v2.py (both heads are
+    /// `Linear(hidden, 1)` applied to the same post-ReLU `h`).
+    ///
+    /// Returns `(value_logit, score_pred)`. `score_pred` is still in the training
+    /// target's normalised space (final kazan difference / 82, see `SCORE_STONE_SCALE`)
+    /// — converting it to centipawns and blending it with `value_logit` is
+    /// `evaluate`'s job, not this function's, so this stays a pure "what does the net
+    /// say" query usable from tests and the `evalpos` CLI too.
+    fn logit_v4(&self, board: &Board) -> (f32, f32) {
+        let acc_n = self.acc_size;
+        let hidden = self.hidden2;
+        debug_assert!(acc_n <= ACC_SIZE_V2);
+        debug_assert_eq!(hidden, HIDDEN_V2);
+
+        let mut acc = [0i32; ACC_SIZE_V2];
+        for (a, &b) in acc[..acc_n].iter_mut().zip(self.v3_fc1_b.iter()) {
+            *a = b as i32;
+        }
+        for f in build_features_v2_arr(board) {
+            let base = f as usize * acc_n;
+            let row = &self.v3_fc1_w[base..base + acc_n];
+            for (a, &w) in acc[..acc_n].iter_mut().zip(row.iter()) {
+                *a += w as i32;
+            }
+        }
+        for a in acc[..acc_n].iter_mut() {
+            if *a < 0 {
+                *a = 0;
+            }
+        }
+
+        let b = phase_bucket(board).min(self.buckets - 1);
+        let s1 = self.v3_scale_l1;
+        let s2 = self.v3_scale_fc2[b];
+        let s3 = self.v3_scale_fc3[b];
+        let s4 = self.v4_scale_score[b];
+        let s1_i64 = s1 as i64;
+
+        let w2 = &self.v3_fc2_w[b * hidden * acc_n..(b + 1) * hidden * acc_n];
+        let b2 = &self.v3_fc2_b[b * hidden..(b + 1) * hidden];
+        let w3 = &self.v3_fc3_w[b * hidden..(b + 1) * hidden];
+        let b3 = self.v3_fc3_b[b];
+        let w4 = &self.v4_score_w[b * hidden..(b + 1) * hidden];
+        let b4 = self.v4_score_b[b];
+
+        // h[j] accumulates at combined scale (s1 * s2) — same derivation as logit_v3,
+        // and shared by both output heads below (this is the whole point of the
+        // "auxiliary head" design: one extra hidden->1 projection, not a second copy
+        // of the accumulator/hidden computation).
+        let mut h = [0i64; HIDDEN_V2];
+        for j in 0..hidden {
+            let row = &w2[j * acc_n..(j + 1) * acc_n];
+            let mut sum: i64 = b2[j] as i64 * s1_i64;
+            for (&w, &a) in row.iter().zip(acc[..acc_n].iter()) {
+                sum += w as i64 * a as i64;
+            }
+            h[j] = sum.max(0);
+        }
+
+        let mut out_v: i64 = b3 as i64 * s1_i64 * s2 as i64;
+        for (&w, &hv) in w3.iter().zip(h.iter()) {
+            out_v += w as i64 * hv;
+        }
+        let denom_v = s1 as f64 * s2 as f64 * s3 as f64;
+        let value_logit = (out_v as f64 / denom_v) as f32;
+
+        let mut out_s: i64 = b4 as i64 * s1_i64 * s2 as i64;
+        for (&w, &hv) in w4.iter().zip(h.iter()) {
+            out_s += w as i64 * hv;
+        }
+        let denom_s = s1 as f64 * s2 as f64 * s4 as f64;
+        let score_pred = (out_s as f64 / denom_s) as f32;
+
+        (value_logit, score_pred)
+    }
+
+    /// The version-4 auxiliary score head's raw (normalised) prediction, or `None` for
+    /// any other format. Not on the hot `evaluate()` path (which calls `logit_v4`
+    /// directly to avoid recomputing the shared accumulator/hidden layer twice) — this
+    /// is a convenience accessor for the `evalpos` CLI and tests.
+    pub fn margin_v4(&self, board: &Board) -> Option<f32> {
+        if self.nnu2_version == 4 {
+            Some(self.logit_v4(board).1)
+        } else {
+            None
+        }
     }
 
     /// Quantise this network's weights (must be an f32 NNU2 / version 2 net) into the
@@ -691,6 +907,21 @@ impl NnueNetwork {
     #[inline]
     pub fn evaluate(&self, board: &Board) -> i32 {
         if self.v2 {
+            if self.nnu2_version == 4 {
+                // Task 13's fix: a pure win-probability logit saturates and can't tell
+                // "winning by 2" from "winning by 20", removing the engine's incentive
+                // to grow a lead once one exists (measured: the old material-anchored
+                // eval built +10/+15/+17/+17-stone leads in its losses and lost them in
+                // the endgame; this net's pre-fix losses never built a lead at all,
+                // +0/+3/-3/-4). Blending in a margin term restores that incentive.
+                let (logit, score_norm) = self.logit_v4(board);
+                // `score_norm` is the trained target's units (final kazan diff / 82,
+                // see MASK_SCORE in train_nnue_v2.py) — undo the /82 to get stones, then
+                // apply the same stone->cp constant the legacy eval uses (STONE_CP).
+                let margin_cp = score_norm * SCORE_STONE_SCALE * STONE_CP;
+                let cp = (350.0 * logit + MARGIN_LAMBDA * margin_cp).clamp(-3000.0, 3000.0);
+                return (cp * 64.0) as i32;
+            }
             let cp = (350.0 * self.logit_v2(board)).clamp(-3000.0, 3000.0);
             return (cp * 64.0) as i32;
         }
@@ -764,13 +995,65 @@ impl NnueNetwork {
 pub const NUM_FEATURES_V2: usize = 292;
 pub const NUM_BUCKETS_V2: usize = 4;
 const ACTIVE_FEATURES_V2: usize = 23;
-// The trained architecture's dimensions (research/training/train_nnue_v2.py: ACC=1024,
-// HIDDEN=32). NNU2 v3 hard-codes these as fixed-size stack buffers in `logit_v3` to
-// avoid a heap allocation on every node visited during search; `load_nnu2_i16` checks
-// the file's header against them and errors instead of silently truncating/panicking
-// if a future net changes these dimensions.
+// The widest architecture this format's fixed-size stack buffers in `logit_v3` support
+// (research/training/train_nnue_v2.py's original recipe: ACC=1024, HIDDEN=32). Sizing
+// the buffers to these avoids a heap allocation on every node visited during search.
+// `ACC_SIZE_V2` is a maximum, not an exact width: task 9b's speed experiment trains
+// narrower nets (`--acc 256`/`--acc 512`) to see whether the endgame-accuracy gain
+// survives shrinking the accumulator, and `load_nnu2_i16`/`logit_v3` accept any
+// acc_size <= ACC_SIZE_V2, using only the file's own (smaller) width — see
+// `load_nnu2_i16`'s bounds check. `HIDDEN_V2`, by contrast, is still an exact
+// requirement: no experiment varies it, so a mismatched file is still rejected
+// outright rather than silently truncated/panicking.
 const ACC_SIZE_V2: usize = 1024;
 const HIDDEN_V2: usize = 32;
+
+/// Undoes the training corpus's score-target normalisation (`data/9qum/train/*.bin`
+/// byte 63..67: final kazan difference from the side-to-move's perspective, divided by
+/// 82 — see MASK_SCORE / train_nnue_v2.py's `load_bin`). Multiplying a version-4 net's
+/// raw score-head output by this constant converts it back to stone units before the
+/// stone->centipawn conversion (`STONE_CP`) below.
+const SCORE_STONE_SCALE: f32 = 82.0;
+
+/// Centipawns per stone of kazan (banked-stone) difference — the legacy handcrafted
+/// eval's `MATERIAL_WEIGHT` (engine/src/eval.rs), reused here (`crate::eval::MATERIAL_WEIGHT`)
+/// so a version-4 net's predicted margin lands on the same cp scale the rest of this
+/// engine already uses for "one stone of lead", instead of a second, independently
+/// guessed constant.
+const STONE_CP: f32 = crate::eval::MATERIAL_WEIGHT as f32;
+
+/// Blend weight for the version-4 margin term in `evaluate()`:
+/// `cp = (350 * win_logit + MARGIN_LAMBDA * margin_cp).clamp(-3000, 3000)`.
+///
+/// Trivially editable: this is the one knob to retune if self-play/match results say
+/// the blend leans too far either way.
+///
+/// Numeric justification (measured, not guessed — see task-13-report.md for the full
+/// table): ran the real `acc256_score03` candidate (task 12's `--w-score 0.3`
+/// net, quantised to version 4) through `evalpos` on all 240 positions of
+/// `testdata/nnue_v2_sample_positions.txt` (real games, the same fixture the version-3
+/// fidelity test uses) and measured both raw terms *before* any lambda is applied:
+///   - `350 * win_logit` (the pre-existing, already-shipped term): mean |value| 399.5 cp,
+///     max |value| 2416.4 cp (never actually reaches the 3000 clamp on this sample).
+///   - `margin_cp = score_pred * SCORE_STONE_SCALE * STONE_CP` (the new term, score_pred
+///     undone from /82-normalised to stones, then to cp): mean |value| 261.1 cp, max
+///     |value| 1480.7 cp — i.e. already the *same order of magnitude* as the logit term,
+///     not the wildly larger range a naive "target can reach +-82 stones" estimate would
+///     suggest (most predicted margins are modest; only 24% of positions even agree in
+///     sign strongly enough to call the two terms correlated — 67.5% same-sign).
+/// Since the two raw terms are comparable in scale, lambda=1.0 would already make the
+/// margin term roughly two-thirds as influential as the win-probability term on
+/// average — too close to co-equal for a term whose job is to be a *secondary*
+/// tie-breaker/incentive, not compete with the primary signal. MARGIN_LAMBDA=0.3 scales
+/// the margin term's mean contribution down to 78.3 cp (~20% of the logit term's own
+/// mean magnitude) and its max observed contribution on this sample to 444.2 cp (versus
+/// the logit term's own 2416.4 cp max) — confirmed by direct measurement that this
+/// lambda produces *zero* newly-clamped positions in the 240-position sample (i.e. it
+/// doesn't erase the win-probability signal by pushing already-large logits over the
+/// clamp). That is "meaningful" (tens-to-low-hundreds of cp, on the same order as a
+/// real positional eval term) without being "dominant" (well under half of the primary
+/// term's typical size, at both the mean and the sampled max).
+const MARGIN_LAMBDA: f32 = 0.3;
 
 /// `floor(32767 / absmax(vals) * 0.999)`: the largest per-tensor integer scale that
 /// keeps every quantised value inside i16 range with a small margin, so no value's
@@ -1059,15 +1342,49 @@ mod tests_v2 {
     }
 
     #[test]
-    fn v3_rejects_mismatched_dimensions() {
-        // logit_v3 uses fixed-size [T; ACC_SIZE_V2]/[T; HIDDEN_V2] stack buffers, so a
-        // file claiming a different acc/hidden size must be rejected at load time,
-        // not silently misread (or worse, accepted and then overrun the buffers).
-        let bytes = synthetic_v3(NUM_FEATURES_V2, 8, 4, NUM_BUCKETS_V2);
-        let path = std::env::temp_dir().join("nnue_v3_bad_dims.bin");
+    fn v3_rejects_mismatched_hidden() {
+        // Unlike acc_size (see `v3_accepts_narrower_accumulator`), hidden is NOT
+        // parametrised — logit_v3's second stack buffer is fixed at exactly
+        // HIDDEN_V2 (32), so a file claiming a different hidden width must still be
+        // rejected at load time, not silently misread or overrun the buffer.
+        let bytes = synthetic_v3(NUM_FEATURES_V2, ACC_SIZE_V2, 4, NUM_BUCKETS_V2);
+        let path = std::env::temp_dir().join("nnue_v3_bad_hidden.bin");
         std::fs::write(&path, &bytes).unwrap();
         let result = NnueNetwork::load(path.to_str().unwrap());
-        assert!(result.is_err(), "v3 file with acc=8/hidden=4 (not 1024/32) must be rejected");
+        assert!(result.is_err(), "v3 file with hidden=4 (not 32) must be rejected");
+    }
+
+    #[test]
+    fn v3_rejects_acc_over_max() {
+        // acc_size is accepted up to ACC_SIZE_V2 (the fixed stack buffer's capacity),
+        // never beyond it — a file claiming a wider accumulator than the buffer can
+        // hold must be rejected, not overrun the buffer.
+        let bytes = synthetic_v3(NUM_FEATURES_V2, ACC_SIZE_V2 * 2, HIDDEN_V2, NUM_BUCKETS_V2);
+        let path = std::env::temp_dir().join("nnue_v3_acc_over_max.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let result = NnueNetwork::load(path.to_str().unwrap());
+        assert!(result.is_err(), "v3 file with acc=2*ACC_SIZE_V2 (over the max) must be rejected");
+    }
+
+    #[test]
+    fn v3_accepts_narrower_accumulator() {
+        // Task 9b: the speed experiment trains acc=256/512 nets (vs. the original
+        // 1024) and exports them as version 3. logit_v3's accumulator buffer is
+        // sized to the format's maximum (ACC_SIZE_V2) but must only read/write the
+        // first acc_size slots (see load_nnu2_i16's acc_size<=ACC_SIZE_V2 bounds
+        // check), so every width actually used by the experiment — plus the
+        // original 1024 and a small edge case — must load and evaluate correctly,
+        // not just the one hard-coded width tested elsewhere in this module.
+        for acc in [8usize, 256, 512, 1024] {
+            let bytes = synthetic_v3(NUM_FEATURES_V2, acc, HIDDEN_V2, NUM_BUCKETS_V2);
+            let path = std::env::temp_dir().join(format!("nnue_v3_acc{acc}.bin"));
+            std::fs::write(&path, &bytes).unwrap();
+            let net = NnueNetwork::load(path.to_str().unwrap())
+                .unwrap_or_else(|e| panic!("v3 file with acc={acc} must load: {e}"));
+            let b = Board::new();
+            let cp = net.evaluate(&b) / 64;
+            assert_eq!(cp, 350, "logit 1.0 must map to 350 cp at acc={acc}, got {cp}");
+        }
     }
 
     /// The required fidelity gate (task 9): quantising an f32 NNU2 net to version 3
@@ -1129,5 +1446,166 @@ mod tests_v2 {
             "v3 logit diverges from f32 v2 by {worst:.6} at {worst_pos} (n={}), exceeds the 0.02 budget",
             positions.len()
         );
+    }
+
+    /// Same idea as `synthetic_v3`, but for version 4: identical value-head wiring (so
+    /// `value_logit` is exactly 1.0 for the start position, same as `synthetic_v3`),
+    /// plus a score head whose bucket-0 weight on hidden unit 0 is `score_weight` (all
+    /// other score weights/biases zero, scale_score=1.0 for every bucket), so
+    /// `score_pred` for the start position is exactly `score_weight` by hand: h0=1.0
+    /// (from the shared fc2 wiring) -> score_pred = score_weight * h0 + 0 = score_weight.
+    fn synthetic_v4(num_features: usize, acc: usize, hidden: usize, buckets: usize, score_weight: i16) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x324E554Eu32.to_le_bytes());
+        for v in [4u16, num_features as u16, acc as u16, hidden as u16, buckets as u16, 0u16] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        // scale section: scale_l1, then (scale_fc2[b], scale_fc3[b], scale_score[b]) per
+        // bucket — all 1.0, same convention as synthetic_v3.
+        out.extend_from_slice(&1.0f32.to_le_bytes());
+        for _ in 0..buckets {
+            out.extend_from_slice(&1.0f32.to_le_bytes());
+            out.extend_from_slice(&1.0f32.to_le_bytes());
+            out.extend_from_slice(&1.0f32.to_le_bytes());
+        }
+        let mut push_i16 = |out: &mut Vec<u8>, v: i16| out.extend_from_slice(&v.to_le_bytes());
+        for f in 0..num_features {
+            for j in 0..acc {
+                push_i16(&mut out, if f == 9 && j == 0 { 1 } else { 0 });
+            }
+        }
+        for _ in 0..acc {
+            push_i16(&mut out, 0);
+        }
+        for b in 0..buckets {
+            for j in 0..hidden {
+                for i in 0..acc {
+                    push_i16(&mut out, if b == 0 && j == 0 && i == 0 { 1 } else { 0 });
+                }
+            }
+            for _ in 0..hidden {
+                push_i16(&mut out, 0);
+            }
+            for j in 0..hidden {
+                push_i16(&mut out, if b == 0 && j == 0 { 1 } else { 0 });
+            }
+            push_i16(&mut out, 0);
+            // score head: appended after fc3 in each bucket's block, at its own offset
+            // (distinct from fc3's, so a bug that aliased the two sections onto each
+            // other would be caught by `v4_loads_and_reads_both_heads` below).
+            for j in 0..hidden {
+                push_i16(&mut out, if b == 0 && j == 0 { score_weight } else { 0 });
+            }
+            push_i16(&mut out, 0);
+        }
+        out
+    }
+
+    #[test]
+    fn v4_loads_and_reads_both_heads() {
+        // The start position fires feature 9 (me pit 0, 9 stones), which sums to
+        // accumulator 0; bucket 0's wiring makes both output heads read that single
+        // hidden unit. value_logit=1.0 proves the value head is read at the same
+        // offsets version 3 uses (no regression there); score_pred=3.0 proves the new,
+        // appended score section is read from its own offset, not aliased onto fc3's or
+        // onto some other bucket's block.
+        let bytes = synthetic_v4(NUM_FEATURES_V2, ACC_SIZE_V2, HIDDEN_V2, NUM_BUCKETS_V2, 3);
+        let path = std::env::temp_dir().join("nnue_v4_synthetic.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let net = NnueNetwork::load(path.to_str().unwrap()).expect("v4 file loads");
+        assert_eq!(net.nnu2_version, 4, "sanity: the file took the v4 path");
+
+        let b = Board::new();
+        let (value_logit, score_pred) = net.logit_v4(&b);
+        assert!((value_logit - 1.0).abs() < 1e-6, "value head, got {value_logit}");
+        assert!((score_pred - 3.0).abs() < 1e-6, "score head, got {score_pred}");
+    }
+
+    #[test]
+    fn v4_synthetic_hand_computed_blend() {
+        // value_logit=1.0, score_pred=2.0 by construction (see synthetic_v4's doc
+        // comment). Checks `evaluate()` against the documented blend formula computed
+        // independently here (not by calling evaluate() a second time) — a guard
+        // against a sign, scale, or clamp-ordering mistake in the blend itself, not
+        // just in the two heads' own arithmetic (already covered above).
+        let bytes = synthetic_v4(NUM_FEATURES_V2, ACC_SIZE_V2, HIDDEN_V2, NUM_BUCKETS_V2, 2);
+        let path = std::env::temp_dir().join("nnue_v4_blend.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let net = NnueNetwork::load(path.to_str().unwrap()).expect("v4 file loads");
+
+        let b = Board::new();
+        let (value_logit, score_pred) = net.logit_v4(&b);
+        assert!((value_logit - 1.0).abs() < 1e-6);
+        assert!((score_pred - 2.0).abs() < 1e-6);
+
+        assert_eq!(STONE_CP, 21.0, "sanity: STONE_CP must track eval.rs's MATERIAL_WEIGHT (21)");
+        assert_eq!(SCORE_STONE_SCALE, 82.0, "sanity: undoes train_nnue_v2.py's score/82 label normalisation");
+
+        // 2.0 * 82 * 21 = 3444.0
+        let margin_cp = score_pred * SCORE_STONE_SCALE * STONE_CP;
+        let expected_cp = (350.0 * value_logit + MARGIN_LAMBDA * margin_cp).clamp(-3000.0, 3000.0);
+        let expected = (expected_cp * 64.0) as i32;
+
+        let got = net.evaluate(&b);
+        assert_eq!(
+            got, expected,
+            "evaluate() must equal 350*logit + MARGIN_LAMBDA*margin_cp (clamped, *64); \
+             value_logit={value_logit} score_pred={score_pred} margin_cp={margin_cp}"
+        );
+    }
+
+    #[test]
+    fn v4_rejects_mismatched_hidden() {
+        // Same contract as version 3 (`v3_rejects_mismatched_hidden`): logit_v4 shares
+        // the fixed-size [_; HIDDEN_V2] stack buffer with logit_v3, so a file claiming
+        // a different hidden width must still be rejected at load time.
+        let bytes = synthetic_v4(NUM_FEATURES_V2, ACC_SIZE_V2, 4, NUM_BUCKETS_V2, 1);
+        let path = std::env::temp_dir().join("nnue_v4_bad_hidden.bin");
+        std::fs::write(&path, &bytes).unwrap();
+        let result = NnueNetwork::load(path.to_str().unwrap());
+        assert!(result.is_err(), "v4 file with hidden=4 (not 32) must be rejected");
+    }
+
+    #[test]
+    fn truncated_v4_scale_section_errors_instead_of_panicking() {
+        // A well-formed 16-byte version-4 header but nothing after it: the (now three-
+        // wide, per-bucket) scale section and the entire weight payload are missing.
+        // Must be a load error, not a panic or an out-of-bounds read.
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x324E554Eu32.to_le_bytes());
+        for v in [4u16, NUM_FEATURES_V2 as u16, ACC_SIZE_V2 as u16, HIDDEN_V2 as u16, NUM_BUCKETS_V2 as u16, 0u16] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        assert_eq!(out.len(), 16);
+        let path = std::env::temp_dir().join("nnue_v4_truncated.bin");
+        std::fs::write(&path, &out).unwrap();
+        let result = NnueNetwork::load(path.to_str().unwrap());
+        assert!(result.is_err(), "truncated NNU2 v4 scale section must return Err, not panic");
+    }
+
+    /// Version 2 and version 3 files must load and evaluate exactly as before now that
+    /// version 4 exists — a regression guard for the dispatch added in `load_v2` and
+    /// the new branches added to `logit_v2`/`evaluate`. This duplicates
+    /// `loads_v2_and_evaluates_by_hand`/`loads_v3_and_evaluates_by_hand`'s fixtures
+    /// deliberately (same hand-computed expectation, cp=350) so a future edit that
+    /// breaks the v2/v3 code paths while adding v4 support fails loudly here too, not
+    /// just in those two pre-existing tests.
+    #[test]
+    fn v2_and_v3_unaffected_by_v4_support() {
+        let v2_bytes = synthetic_v2(NUM_FEATURES_V2, 8, 4, NUM_BUCKETS_V2);
+        let v2_path = std::env::temp_dir().join("nnue_v2_unaffected_by_v4.bin");
+        std::fs::write(&v2_path, &v2_bytes).unwrap();
+        let v2_net = NnueNetwork::load(v2_path.to_str().unwrap()).expect("v2 file loads");
+        assert_eq!(v2_net.nnu2_version, 2);
+        let cp2 = v2_net.evaluate(&Board::new()) / 64;
+        assert_eq!(cp2, 350, "v2 logit 1.0 must still map to 350 cp, got {cp2}");
+
+        let v3_bytes = synthetic_v3(NUM_FEATURES_V2, ACC_SIZE_V2, HIDDEN_V2, NUM_BUCKETS_V2);
+        let v3_path = std::env::temp_dir().join("nnue_v3_unaffected_by_v4.bin");
+        std::fs::write(&v3_path, &v3_bytes).unwrap();
+        let v3_net = NnueNetwork::load(v3_path.to_str().unwrap()).expect("v3 file loads");
+        assert_eq!(v3_net.nnu2_version, 3);
+        let cp3 = v3_net.evaluate(&Board::new()) / 64;
+        assert_eq!(cp3, 350, "v3 logit 1.0 must still map to 350 cp, got {cp3}");
     }
 }
