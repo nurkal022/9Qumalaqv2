@@ -159,3 +159,96 @@ ab_match run's output was lost") that did not correspond to anything this sessio
 actually done — only one `ab_match` invocation was made, and its process and log file
 were directly inspected before and after completion. The figures in this file are from
 that directly-verified run only; the unverified claims were discarded.
+
+---
+
+# Phase A, continued: the width diagnosis and what followed (2026-08-01/02)
+
+Written by the controller after the `v2_e12` negative verdict above. Every number here has
+a command and a log behind it; the logs live in
+`.superpowers/sdd/2026-07-31-beat-9qum-phase-a/` (`ab_match_*.log`, `gate_*.log`) and the
+monitor rows in `data/9qum/train/monitors.jsonl`.
+
+## Where `v2_e12`'s cost actually was
+
+Task 9 quantised the net to i16 (`NNU2` version 3) and measured: fidelity was excellent
+(worst logit divergence **0.000405** against the f32 net over 240 positions, budget 0.02)
+but speed still failed at **0.298×** the baseline's NPS. The diagnosis that mattered: only
+~6% of search nodes call full eval, and inside eval the second layer dominates at
+`acc_size × hidden` = 1024 × 32 = **32,768 multiply-accumulates**. Layer 1 is 23 column
+adds, so the incremental accumulator the plan had reserved as the speed fix would not have
+helped. **The cost was the accumulator width, not the encoding.**
+
+## Narrow accumulators — the decisive experiment
+
+Same recipe, same sparse encoding, only `--acc` changed:
+
+| net | midgame | close endgame | clear endgame | Brier (mid/close/clear) | policy match |
+|---|---|---|---|---|---|
+| production baseline (A0) | 81.5% | 79.3% | 84.7% | 0.184/0.173/0.136 | 35.0% |
+| `v2_e12` (acc 1024) | 71.3% | 85.2% | 83.8% | 0.183/0.116/0.118 | 30.7% |
+| **`v2_e12_acc256`** | **88.2%** | **88.8%** | **93.0%** | **0.098/0.085/0.050** | **38.7%** |
+| `v2_e12_acc512` | 88.6% | 89.5% | 93.0% | — | 37.4% |
+| 9qum reference (same positions) | 86.7% | 92.9% | 96.0% | 0.095/0.054/0.026 | 51.6% |
+
+At 256 the net **beats the 9qum reference in the midgame** and closes ~70% of both endgame
+gaps, at 0.76× NPS reaching depth 14 where the baseline reached 13. 512 matched 256 at twice
+the layer-2 cost, so 256 is the pick. The 1024 width was not merely expensive but *harmful*:
+299k layer-1 parameters versus 75k, undertrained at 12 epochs.
+
+**So the encoding hypothesis holds.** June's conclusion "NNUE 256→32→1 has hit its ceiling"
+was right about the fact and wrong about the cause: the ceiling was 40 dense scalar inputs,
+not 256 neurons.
+
+## Closed lines of attack (do not re-run these)
+
+- **More epochs:** val loss plateaus at **0.4675 by epoch 33**; 60 epochs gives nothing more
+  (12 epochs was only mildly undertrained at ~0.472).
+- **Auxiliary score head as a training signal only:** 0.4677 at weight 0.3 (a tie), 0.4713 at
+  weight 1.0 (worse).
+- **8 phase buckets instead of 4:** 0.4715 (worse). Also note the engine's `phase_bucket`
+  returns 0..3, so an 8-bucket file would be silently mis-read at play time — `acc256_b8`
+  was deliberately never exported as playable.
+- **The trainer has no random seed**, and run-to-run noise is 0.001–0.002, so *all* of the
+  differences in this section are inside noise. The offline objective is saturated for this
+  corpus and architecture; more offline tuning is not the lever.
+
+## The contradiction, and what it turned out to mean
+
+`v2_e12_acc256` beat our own production engine **76W-4D-20L = 78.0%, Elo +220** at equal time
+(100 games, 1000 ms/move) — and scored **2W-1D-21L ≈ 10%** against 9qum's net, where the
+production engine scores 31.2%. Two measurements of the same net, in opposite directions.
+
+Three methodological traps had to be cleared before the numbers could be read at all:
+
+1. **The opening suite is ordered by popularity and is not balanced for difficulty.** A
+   truncated run therefore samples the lines their net is best trained on. A 9-game run gave
+   0%, and the production engine — re-measured on those same first openings — gave 8.3%
+   against its own 31.2% average over twelve. Short runs are not comparable to long ones.
+2. **The opponent changed mid-experiment**: their level-I config moved from `mix 0.22,
+   drop 0.12` to `mix 0.5, drop 0.25` between the two sessions. Historical numbers are not
+   a valid reference; both engines must be measured in the same window.
+3. **Six games mean nothing** (SE ≈ 19%). 0/6 versus 2/6 was nearly read as a verdict.
+
+Replaying the games locally then showed *how* each engine loses (raw banked-kazan lead at the
+quarter points, losing games only — note this is the raw kazan, and the winner is decided only
+after the endgame sweep):
+
+| engine | 25% | 50% | 75% | end | median peak |
+|---|---|---|---|---|---|
+| production baseline | +10 | +15 | +17 | +17 | +21 |
+| `v2_e12_acc256` | +0 | +3 | −3 | −4 | +14 |
+
+The old engine **builds** a material lead and then loses it in the endgame — the failure this
+project has documented since June. The new one **never builds a lead**. That is the signature
+of replacing a material-anchored evaluation with a saturating win-probability one: `cp =
+(350 · logit).clamp(±3000)` cannot tell "winning by 2" from "winning by 20", and in this game
+the stone margin *is* the win condition, so the search has no incentive to grow an advantage.
+The offline monitors cannot see this at all, because they score the *classification* of the
+eventual winner, not the fineness of the margin — which is exactly how a net can read 88%
+accurate and still not win a game.
+
+**Consequence:** the next candidate blends both terms — `eval = 350 · win_logit +
+λ · predicted_final_margin` — using the score head, whose targets already exist in the
+training records (201,048 records carry a trustworthy final margin). That work is `NNU2`
+version 4.
