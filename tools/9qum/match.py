@@ -33,6 +33,27 @@ from engine import Engine  # noqa: E402  (repo-local helper)
 BASE = "https://9qum.com/api"
 UA = "9qumalaq-research/1.0 (friendly engine research; contact via 9qum founder)"
 
+# Their analysis boards expire (idle timeout or server-side eviction) well within the
+# lifetime of a 200+-ply game at ~2.5s/request; a 404 here is routine, not fatal.
+NOT_FOUND_MARKERS = ("не найдена", "not found")
+MAX_RECOVERIES_PER_GAME = 3  # bound on board recreations before a game is abandoned (void)
+
+
+class GameNotFoundError(RuntimeError):
+    """The API reports the analysis board no longer exists (expired/evicted).
+
+    Kept distinct from plain RuntimeError so callers can recover-by-recreating instead
+    of the whole match dying, while other HTTP failures (bad move, auth, etc.) still
+    raise as before.
+    """
+
+
+class GameVoidError(RuntimeError):
+    """A game could not be salvaged — board recreation failed, or recovery budget for
+    this game was exhausted. The caller must record this game as VOID and move on,
+    never fold it into the win/draw/loss counts.
+    """
+
 
 def pos_from_state(st):
     """9qum state -> our engine position string w0..w8/b0..b8/kw,kb/tw,tb/side."""
@@ -81,7 +102,10 @@ class Api:
                     continue
                 data = r.json()
                 if r.status_code != 200:
-                    raise RuntimeError(f"{path}: HTTP {r.status_code} {data.get('detail')}")
+                    detail = data.get("detail") if isinstance(data, dict) else None
+                    if r.status_code == 404 or any(m in str(detail or "").lower() for m in NOT_FOUND_MARKERS):
+                        raise GameNotFoundError(f"{path}: HTTP {r.status_code} {detail}")
+                    raise RuntimeError(f"{path}: HTTP {r.status_code} {detail}")
                 return data
             except requests.RequestException:
                 if attempt == 9:
@@ -123,37 +147,93 @@ def opening_suite(path, plies, min_count, n):
             for g, ln, b in lines[:n]]
 
 
+def _position_of(st):
+    """The position payload analysis/new expects, read back from a state the server gave
+    us. This is what makes board recreation lossless: recovery always restores the
+    position the harness currently holds, never the game's original opening."""
+    return {"pits": st["pits"], "kazan": st["kazan"], "tuzdyk": st.get("tuzdyk"), "to_move": st["to_move"]}
+
+
 def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, idx, mode="analysis",
-              opening=None):
+              opening=None, max_recoveries=MAX_RECOVERIES_PER_GAME):
     """One game. In `analysis` mode the board is an analysis board: we may post moves for
     both sides, so their net plays argmax(visits) — full strength. In `ai-game` mode the
-    server owns the AI side and only accepts its own (mix/drop-randomised) choice."""
-    if mode == "analysis":
-        st = api.post("analysis/new", {"position": (opening or {}).get("position", START)})
-    else:
-        st = api.post("game/new", {"human_player": our_seat, "ai_level": level})
-    gid = st["game_id"]
-    lvl = st.get("ai_level") or {}
-    plies = 0
+    server owns the AI side and only accepts its own (mix/drop-randomised) choice.
 
-    while not st.get("finished") and plies < 400:
-        if st["to_move"] == our_seat:
-            mv = eng.bestmove(pos_from_state(st), time_ms=move_ms)
-            if isinstance(mv, tuple):       # engine says terminal
-                break
+    Their analysis boards expire (idle timeout or server-side eviction); a 404 on any
+    board-scoped call is recovered by recreating the board at the harness's CURRENT
+    position (not the game's opening) and retrying the same request. Recovery is bounded
+    per game by `max_recoveries`; if it is exhausted, or recreation itself fails, the
+    game is abandoned and returned/logged as VOID instead of raising (which would kill
+    the whole match) or being folded into the win/draw/loss counts as a loss.
+    """
+    recoveries = 0
+    gid = None
+    st = None
+    plies = 0
+    void_reason = None
+
+    def recreate_board():
+        nonlocal gid, recoveries
+        if recoveries >= max_recoveries:
+            raise GameVoidError(f"exceeded {max_recoveries} board recoveries in one game")
+        recoveries += 1
+        try:
+            new_st = api.post("analysis/new", {"position": _position_of(st)})
+        except Exception as exc:   # recreation itself failed -> nothing left to retry
+            raise GameVoidError(f"board recreation failed: {exc}") from exc
+        gid = new_st["game_id"]
+
+    def post_board(path, payload_fn):
+        """POST a board-scoped call (payload_fn takes the current game id); on a 404
+        (board expired) recreate the board and retry, up to max_recoveries per game."""
+        while True:
+            try:
+                return api.post(path, payload_fn(gid))
+            except GameNotFoundError:
+                recreate_board()
+
+    try:
+        if mode == "analysis":
+            st = api.post("analysis/new", {"position": (opening or {}).get("position", START)})
         else:
-            # ai/think works on analysis boards too, is unmetered and returns the full
-            # visit distribution; analysis/hint is the paid product and 429s quickly.
-            think = api.post("ai/think", {"game_id": gid, "n_sims": their_sims})
-            cand = [m for m in think.get("moves", []) if m.get("N", 0) > 0]
-            if pick == "argmax" and cand:
-                mv = max(cand, key=lambda m: m["N"])["hole"]
+            st = api.post("game/new", {"human_player": our_seat, "ai_level": level})
+        gid = st["game_id"]
+        lvl = st.get("ai_level") or {}
+
+        while not st.get("finished") and plies < 400:
+            if st["to_move"] == our_seat:
+                mv = eng.bestmove(pos_from_state(st), time_ms=move_ms)
+                if isinstance(mv, tuple):       # engine says terminal
+                    break
             else:
-                mv = think.get("best", cand[0]["hole"] if cand else None)
-            if mv is None:
-                break
-        st = api.post("game/move", {"game_id": gid, "hole": mv})
-        plies += 1
+                # ai/think works on analysis boards too, is unmetered and returns the full
+                # visit distribution; analysis/hint is the paid product and 429s quickly.
+                think = post_board("ai/think", lambda g: {"game_id": g, "n_sims": their_sims})
+                cand = [m for m in think.get("moves", []) if m.get("N", 0) > 0]
+                if pick == "argmax" and cand:
+                    mv = max(cand, key=lambda m: m["N"])["hole"]
+                else:
+                    mv = think.get("best", cand[0]["hole"] if cand else None)
+                if mv is None:
+                    break
+            st = post_board("game/move", lambda g: {"game_id": g, "hole": mv})
+            plies += 1
+    except GameVoidError as exc:
+        void_reason = str(exc)
+
+    if void_reason is not None:
+        rec = {"game_id": gid, "mode": mode, "opening": (opening or {}).get("line", ""),
+               "our_seat": our_seat, "level": level, "pick": pick, "move_ms": move_ms,
+               "result": "VOID", "void_reason": void_reason, "recoveries": recoveries,
+               "plies": plies, "kazan": (st or {}).get("kazan"), "tuzdyk": (st or {}).get("tuzdyk"),
+               "ts": int(time.time())}
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        print(f"  game {idx + 1}: seat{our_seat} opening=[{(opening or {}).get('line', 'start')}] -> "
+              f"VOID ({void_reason}) plies={plies} recoveries={recoveries} ({gid})",
+              flush=True)
+        return {"result": "VOID", "recoveries": recoveries}
 
     winner = st.get("winner")
     result = "D" if winner == -1 else ("W" if winner == our_seat else "L")
@@ -161,13 +241,33 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
            "level_mix": lvl.get("mix"), "level_drop": lvl.get("drop"), "pick": pick,
            "move_ms": move_ms, "result": result, "winner": winner, "plies": plies,
            "kazan": st.get("kazan"), "tuzdyk": st.get("tuzdyk"), "record": st.get("record"),
-           "tfen": st.get("tfen"), "net_version": st.get("net_version"), "ts": int(time.time())}
+           "tfen": st.get("tfen"), "net_version": st.get("net_version"), "recoveries": recoveries,
+           "ts": int(time.time())}
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     print(f"  game {idx + 1}: seat{our_seat} opening=[{(opening or {}).get('line', 'start')}] -> {result}  "
-          f"kazan={st.get('kazan')} plies={plies} ({gid})",
+          f"kazan={st.get('kazan')} plies={plies} recoveries={recoveries} ({gid})",
           flush=True)
-    return result
+    return {"result": result, "recoveries": recoveries}
+
+
+def aggregate(results):
+    """Split per-game outcomes (as returned by play_game) into the counted W/D/L/n and
+    the void/recovered side-counts, kept separate on purpose: a void game (board never
+    recovered) must never be folded into the win/draw/loss totals as a loss, since that
+    would silently bias the very measurement this harness exists to produce.
+    """
+    counted = [r for r in results if r["result"] != "VOID"]
+    void = [r for r in results if r["result"] == "VOID"]
+    recovered = [r for r in results if r["recoveries"] > 0]
+    return {
+        "w": sum(1 for r in counted if r["result"] == "W"),
+        "d": sum(1 for r in counted if r["result"] == "D"),
+        "l": sum(1 for r in counted if r["result"] == "L"),
+        "n": len(counted),
+        "void": len(void),
+        "recovered": len(recovered),
+    }
 
 
 def elo(score, n):
@@ -234,12 +334,17 @@ def main():
         for r in pool.map(worker, range(a.games)):
             results.append(r)
 
-    w, d, l = results.count("W"), results.count("D"), results.count("L")
-    n = len(results)
+    agg = aggregate(results)
+    w, d, l, n = agg["w"], agg["d"], agg["l"], agg["n"]
     score = (w + 0.5 * d) / n if n else 0
     e = elo(score, n)
-    print(f"\nOUR ENGINE vs 9qum level '{a.level}' ({a.mode}/{a.pick}): {w}W-{d}D-{l}L over {n} games "
-          f"= {100 * score:.1f}%" + (f" (Elo {e:+.0f})" if e is not None else ""))
+    print(f"\nOUR ENGINE vs 9qum level '{a.level}' ({a.mode}/{a.pick}): {w}W-{d}D-{l}L over {n} counted games "
+          f"= {100 * score:.1f}%" + (f" (Elo {e:+.0f})" if e is not None else "") +
+          f"  [{agg['void']} void, {agg['recovered']} recovered]")
+    if agg["void"]:
+        print(f"  CAVEAT: {agg['void']}/{len(results)} games were VOID (board unrecoverable within "
+              f"{MAX_RECOVERIES_PER_GAME} tries) and are excluded from the score above — "
+              f"see void_reason per game in {log_path}.")
 
 
 if __name__ == "__main__":
