@@ -9,18 +9,30 @@ Exits nonzero if A scores below --min (regression gate).
 
 Usage:
     python3 tools/ab_match.py <engineA> <engineB> [games] [time_ms] \
-        [--nobook] [--jobs N] [--min PCT] [--tt MB]
+        [--nobook] [--jobs N] [--min PCT] [--tt MB] [--save DIR]
 
 Engines run with cwd=engine/ so they find egtb.bin / nnue_weights.bin /
 opening_book.txt. Move indices on the wire are 0-8 (raw best_move).
+
+--save DIR: write one JSON record per finished game, appended as it finishes (not
+held in memory) to a single JSONL file `DIR/ab_match_<unix_ts>.jsonl` -- one file per
+run, one line per game, so a crash mid-run only loses games not yet played, never
+games already completed. Each record has both engines' paths + weights sha256 (see
+tools/engine_provenance.py, shared with tools/9qum/match.py), which engine played
+which colour, the full move list (0-8 wire indices, and the 1-9 human labels), the
+final position and both kazans, the result from A's perspective, ply count, the time
+control, and the git commit -- enough to replay and inspect any single game later
+(see tools/9qum/lead_profile.py). Without --save, output/exit-code/scoring are
+unchanged.
 """
-import sys, os, subprocess, math, time, threading
+import sys, os, subprocess, math, time, threading, json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 GAME_DIR = os.path.join(ROOT, "archive/old-impls/alphazero-code/alphazero")
 assert os.path.isfile(os.path.join(GAME_DIR, "game.py")), f"rules class not found at {GAME_DIR}/game.py"
 sys.path.insert(0, GAME_DIR)
 from game import TogyzQumalaq  # noqa: E402
+from engine_provenance import compute_engine_meta  # noqa: E402  (shared with tools/9qum/match.py)
 
 ENGINE_CWD = os.path.join(ROOT, "engine")
 
@@ -79,8 +91,18 @@ class Engine:
             self.p.kill()
 
 
-def play_game(eng_white, eng_black, time_ms, max_plies=400):
+def play_game(eng_white, eng_black, time_ms, max_plies=400, moves_out=None, final_state_out=None):
+    """Play one game to a result (0=white, 1=black, 2=draw/unknown).
+
+    `moves_out`, if given (a list), gets each move actually applied to the board
+    appended to it in play order, as the wire-protocol 0-8 pit index -- an illegal
+    move that ends the game in forfeit is NOT appended, since it was never applied.
+    `final_state_out`, if given (a dict), is filled with the game's final pits/kazan/
+    tuzdyk/side and its `go pos` string right before returning. Both are no-ops when
+    left None (the default), so existing callers are unaffected.
+    """
     g = TogyzQumalaq(); g.reset()
+    result = None
     for _ in range(max_plies):
         if g.is_terminal():
             break
@@ -90,12 +112,25 @@ def play_game(eng_white, eng_black, time_ms, max_plies=400):
         if mv is None:
             break
         if mv not in g.get_valid_moves_list():
-            return 1 - side  # illegal -> forfeit
+            result = 1 - side  # illegal -> forfeit
+            break
+        if moves_out is not None:
+            moves_out.append(mv)
         g.make_move(mv)
-    if g.is_terminal():
-        w = g.get_winner()
-        return w if w is not None else 2
-    return 2
+    if result is None:
+        if g.is_terminal():
+            w = g.get_winner()
+            result = w if w is not None else 2
+        else:
+            result = 2
+    if final_state_out is not None:
+        s = g.get_state()
+        final_state_out["pits"] = [[int(x) for x in s.pits[0]], [int(x) for x in s.pits[1]]]
+        final_state_out["kazan"] = [int(s.kazan[0]), int(s.kazan[1])]
+        final_state_out["tuzdyk"] = [int(s.tuzdyk[0]), int(s.tuzdyk[1])]
+        final_state_out["side"] = int(s.current_player)
+        final_state_out["pos"] = pos_str(g)
+    return result
 
 
 def elo(score, n):
@@ -103,6 +138,49 @@ def elo(score, n):
         return 0.0
     p = min(max(score / n, 1e-4), 1 - 1e-4)
     return -400 * math.log10(1 / p - 1)
+
+
+def make_game_record(meta_a, meta_b, game_index, a_white, moves, final_state, result_a,
+                      time_ms, tt_mb, a_nobook, b_nobook, ts=None):
+    """Build one JSON-able record for a finished --save game.
+
+    `moves` is the wire-protocol (0-8) pit index for every move actually applied to
+    the board, in play order, starting from the standard start position -- replaying
+    them through tools/playok/engine.py's Engine.apply_move must reproduce
+    `final_state`'s pits/kazan exactly (see tools/test_ab_match.py, and
+    tools/9qum/lead_profile.py which does this for real analysis). `result_a` is
+    "W"/"D"/"L" from engine A's perspective, matching the console tally exactly.
+    `meta_a`/`meta_b` are tools/engine_provenance.compute_engine_meta(...) dicts.
+    """
+    return {
+        "schema": "ab_match_game_v1",
+        "engine_a": {"path": meta_a["engine_path"],
+                     "weights_path": meta_a["engine_weights_path"],
+                     "weights_size": meta_a["engine_weights_size"],
+                     "weights_sha256": meta_a["engine_weights_sha256"]},
+        "engine_b": {"path": meta_b["engine_path"],
+                     "weights_path": meta_b["engine_weights_path"],
+                     "weights_size": meta_b["engine_weights_size"],
+                     "weights_sha256": meta_b["engine_weights_sha256"]},
+        "white": "A" if a_white else "B",
+        "black": "B" if a_white else "A",
+        "moves": list(moves),
+        "moves_1based": [m + 1 for m in moves],
+        "final_position": final_state["pos"],
+        "kazan": final_state["kazan"],
+        "tuzdyk": final_state["tuzdyk"],
+        "result_a": result_a,
+        "plies": len(moves),
+        "time_control_ms": time_ms,
+        "tt_mb": tt_mb,
+        "a_nobook": a_nobook,
+        "b_nobook": b_nobook,
+        # same repo for both engines in this harness, so either meta's git_commit does;
+        # A's is used for a single unambiguous top-level field.
+        "git_commit": meta_a["git_commit"],
+        "game_index": game_index,
+        "ts": ts if ts is not None else int(time.time()),
+    }
 
 
 def main():
@@ -125,6 +203,19 @@ def main():
     jobs = int(opt("--jobs", "6"))
     min_pct = float(opt("--min", "0"))
     tt_mb = int(opt("--tt", "64"))
+    save_dir = opt("--save", None)
+
+    # --save setup: computed once, up front, so a slow sha256 of the weights file
+    # never happens mid-game. Nothing here executes when --save is absent.
+    save_path = None
+    meta_a = meta_b = None
+    save_lock = threading.Lock()
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f"ab_match_{int(time.time())}.jsonl")
+        meta_a = compute_engine_meta(a_path)
+        meta_b = compute_engine_meta(b_path)
+        print(f"saving game records to {save_path}")
 
     # assign games to workers; game index i -> A plays white iff i even (fairness)
     lock = threading.Lock()
@@ -142,11 +233,13 @@ def main():
             for i in indices:
                 A.newgame(); B.newgame()
                 a_white = (i % 2 == 0)
+                moves = [] if save_path else None
+                final_state = {} if save_path else None
                 if a_white:
-                    res = play_game(A, B, time_ms)
+                    res = play_game(A, B, time_ms, moves_out=moves, final_state_out=final_state)
                     a_won, b_won = (res == 0), (res == 1)
                 else:
-                    res = play_game(B, A, time_ms)
+                    res = play_game(B, A, time_ms, moves_out=moves, final_state_out=final_state)
                     a_won, b_won = (res == 1), (res == 0)
                 with lock:
                     if a_won: tally["aw"] += 1
@@ -157,6 +250,18 @@ def main():
                     sc = tally["aw"] + 0.5 * tally["ad"]
                     print(f"  {d:>3}/{games}  A:{tally['aw']}W-{tally['ad']}D-{tally['al']}L  "
                           f"({100*sc/d:.1f}%)", flush=True)
+                if save_path:
+                    result_a = "W" if a_won else ("L" if b_won else "D")
+                    rec = make_game_record(
+                        meta_a, meta_b, i, a_white, moves, final_state, result_a,
+                        time_ms, tt_mb, a_nobook, b_nobook,
+                    )
+                    # write as this game finishes (never batched in memory): a crash
+                    # partway through a 30-60min run must not lose completed games.
+                    line = json.dumps(rec, ensure_ascii=False) + "\n"
+                    with save_lock:
+                        with open(save_path, "a", encoding="utf-8") as f:
+                            f.write(line)
         finally:
             A.close(); B.close()
 

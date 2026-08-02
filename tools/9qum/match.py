@@ -16,10 +16,8 @@ Usage:
   python3 tools/9qum/match.py --games 20 --move-ms 2000 --parallel 3 --level i
 """
 import argparse
-import hashlib
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -33,6 +31,8 @@ sys.path.insert(0, str(REPO / "tools" / "playok"))
 from engine import Engine  # noqa: E402  (repo-local helper)
 sys.path.insert(0, str(REPO / "research" / "data"))
 import features_v2 as fv  # noqa: E402  (repo-local helper: shared position validator)
+sys.path.insert(0, str(REPO / "tools"))
+from engine_provenance import compute_engine_meta  # noqa: E402  (shared with ab_match.py)
 
 BASE = "https://9qum.com/api"
 UA = "9qumalaq-research/1.0 (friendly engine research; contact via 9qum founder)"
@@ -119,43 +119,6 @@ class Api:
 
 
 START = {"pits": [9] * 18, "kazan": [0, 0], "tuzdyk": [None, None], "to_move": 0}
-
-
-def compute_engine_meta(engine_path, repo=REPO):
-    """Identify which engine build + weights + code produced a match, once per run.
-
-    Without this, telling two runs apart meant reconstructing which engine played
-    which games by scraping game ids out of log files -- error-prone, and it already
-    caused two runs to be mis-grouped in an analysis. This is attached to every game
-    record AND the final summary (see build_summary) so a reader never has to guess.
-    """
-    engine_path = Path(engine_path).resolve()
-    weights_path = engine_path.parent / "nnue_weights.bin"
-    weights_size = weights_sha256 = None
-    if weights_path.is_file():
-        try:
-            data = weights_path.read_bytes()
-            weights_size = len(data)
-            weights_sha256 = hashlib.sha256(data).hexdigest()
-        except OSError:
-            pass  # unreadable: leave size/sha256 as None rather than failing the match
-
-    git_commit = None
-    try:
-        out = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
-                             capture_output=True, text=True, timeout=5)
-        if out.returncode == 0:
-            git_commit = out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass  # not a git checkout, or git unavailable: leave None rather than failing
-
-    return {
-        "engine_path": str(engine_path),
-        "engine_weights_path": str(weights_path) if weights_path.is_file() else None,
-        "engine_weights_size": weights_size,
-        "engine_weights_sha256": weights_sha256,
-        "git_commit": git_commit,
-    }
 
 
 def build_summary(engine_meta, agg, num_results, args, log_path):
