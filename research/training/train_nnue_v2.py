@@ -13,6 +13,7 @@ Run: python3.12 research/training/train_nnue_v2.py --epochs 12 --name v2_e12
 """
 import argparse
 import os
+import random
 import struct
 import sys
 
@@ -31,6 +32,30 @@ NUM_FEATURES = fv.NUM_FEATURES
 ACC = 1024
 HIDDEN = 32
 BUCKETS = fv.NUM_BUCKETS
+DEFAULT_SEED = 1234
+
+
+def set_seed(seed: int) -> None:
+    """Seed every source of randomness this script touches: Python's random (unused
+    directly today but cheap insurance), numpy (none currently, same reasoning) and
+    torch's CPU AND CUDA generators (torch.randperm in run_epoch's shuffle, and the
+    model's own weight initialisation, both draw from torch's RNG).
+
+    Without this, every val-loss comparison between two training runs sat inside
+    run-to-run noise of 0.001-0.002 -- enough to make several same-recipe candidate
+    comparisons uninterpretable, since nobody could tell a real improvement from RNG
+    noise in the initial weights and the minibatch order.
+
+    `warn_only=True`: some ops (e.g. EmbeddingBag's CUDA backward) have no fully
+    deterministic implementation; we still want determinism where it's available
+    rather than a hard crash where it isn't. CPU runs (used by
+    test_train_nnue_v2_seed.py, via --device cpu) are unaffected by that caveat.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
 
 class NnueV2(nn.Module):
@@ -342,7 +367,25 @@ def main():
                           "quantised value head + auxiliary score head, task 13) NNU2 to "
                           "PT_PATH with '.pt' replaced by '_v4.bin', then exit. Pass the "
                           "same --acc used to train that checkpoint, as with --quantize-only.")
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                     help="seed for python random / numpy / torch (incl. CUDA); fixed by "
+                          "default so two runs of the same recipe are bit-identical instead "
+                          "of differing by run-to-run noise of ~0.001-0.002 in val loss, "
+                          "which had made several candidate comparisons uninterpretable. "
+                          "Recorded in the printed summary -- see test_train_nnue_v2_seed.py.")
+    ap.add_argument("--limit", type=int, default=None,
+                     help="use only the first N records of --train and --val (after loading, "
+                          "before feature-building). For cheap smoke runs / tests only -- "
+                          "NOT for real training, since it silently shrinks and reorders the "
+                          "dataset. Default (None) uses every record, unchanged.")
+    ap.add_argument("--device", default=None, choices=["cpu", "cuda"],
+                     help="override device selection (default: cuda if available, else cpu). "
+                          "test_train_nnue_v2_seed.py forces --device cpu, since some CUDA "
+                          "ops (e.g. EmbeddingBag's backward) have no deterministic "
+                          "implementation and would make the bit-identical-reproducibility "
+                          "check flaky.")
     a = ap.parse_args()
+    set_seed(a.seed)
 
     if a.quantize_only:
         model = NnueV2(acc=a.acc)
@@ -375,13 +418,17 @@ def main():
         print(f"  scale_score={scales['scale_score']}")
         return
 
-    dev = "cuda" if torch.cuda.is_available() else "cpu"
+    dev = a.device or ("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"seed {a.seed}  device {dev}" + (f"  limit {a.limit}" if a.limit else ""))
     model = NnueV2(acc=a.acc, buckets=a.buckets, score_head=(a.w_score > 0)).to(dev)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr)
     lossf = nn.BCEWithLogitsLoss(reduction="none")
 
     def prep(path):
         pits, kazan, tuz, stm, value, score, mask = load_bin(path)
+        if a.limit:
+            pits, kazan, tuz, stm, value, score, mask = (
+                x[: a.limit] for x in (pits, kazan, tuz, stm, value, score, mask))
         feats, phase = build_feature_matrix(pits, kazan, tuz, stm, buckets=a.buckets)
         w = np.where(mask & MASK_VALUE_NET, a.w_net, a.w_outcome).astype(np.float32)
         score_mask = ((mask & MASK_SCORE) != 0).astype(np.float32)
@@ -443,7 +490,7 @@ def main():
                 print(f"  saved {a.name}.pt only (val {val:.4f}) -- buckets={model.buckets} "
                       f"!= {BUCKETS}: NOT exporting an NNU2 .bin, it would be silently "
                       f"mis-read at play time (see --buckets help)")
-    print(f"best val loss {best:.4f}")
+    print(f"best val loss {best:.4f}  seed={a.seed}")
 
 
 if __name__ == "__main__":

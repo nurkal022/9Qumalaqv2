@@ -15,11 +15,15 @@ open a socket.
 
 Run: python3.12 tools/9qum/test_match.py
 """
+import hashlib
+import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
+import contextlib
 
 sys.path.insert(0, os.path.dirname(__file__))
 import match
@@ -281,6 +285,170 @@ def test_aggregate_all_void_gives_zero_counted_not_a_zero_score_loss():
     assert agg["void"] == 1
 
 
+# --------------------------------------------------------------------------
+# Engine provenance (defect 3): every record + the final summary must say which
+# engine build, which weights, and which code (git commit) produced it -- previously
+# this had to be reconstructed by scraping game ids out of log files, and two runs
+# were mis-grouped in an analysis as a result.
+# --------------------------------------------------------------------------
+def _make_fake_engine_dir(weights_bytes=b"not-a-real-nnu2-file-just-bytes-to-hash"):
+    """A throwaway 'engine directory': a fake, never-executed binary path plus a real
+    nnue_weights.bin beside it, so compute_engine_meta has something real to hash.
+    compute_engine_meta never runs the binary, so it doesn't need to be executable."""
+    d = os.path.join(TMP_DIR, f"fake_engine_{len(os.listdir(TMP_DIR))}")
+    os.makedirs(d, exist_ok=True)
+    weights_path = os.path.join(d, "nnue_weights.bin")
+    with open(weights_path, "wb") as f:
+        f.write(weights_bytes)
+    return os.path.join(d, "togyzkumalaq-engine"), weights_path, weights_bytes
+
+
+def _real_git_head():
+    out = subprocess.run(["git", "-C", str(match.REPO), "rev-parse", "HEAD"],
+                         capture_output=True, text=True, timeout=5)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def test_compute_engine_meta_reads_weights_size_sha256_and_git_commit():
+    engine_path, weights_path, weights_bytes = _make_fake_engine_dir()
+    meta = match.compute_engine_meta(engine_path)
+    assert meta["engine_path"] == os.path.realpath(engine_path)
+    assert meta["engine_weights_path"] == os.path.realpath(weights_path)
+    assert meta["engine_weights_size"] == len(weights_bytes)
+    assert meta["engine_weights_sha256"] == hashlib.sha256(weights_bytes).hexdigest()
+    # match.REPO IS a git checkout (this test runs inside it), so this must be the
+    # real HEAD, not None -- and it must be a full 40-char hex sha, not a truncated one.
+    want_commit = _real_git_head()
+    assert want_commit, "this test must run inside a git checkout"
+    assert meta["git_commit"] == want_commit
+    assert len(meta["git_commit"]) == 40
+
+
+def test_compute_engine_meta_handles_missing_weights_file():
+    d = os.path.join(TMP_DIR, "fake_engine_no_weights")
+    os.makedirs(d, exist_ok=True)
+    engine_path = os.path.join(d, "togyzkumalaq-engine")  # no nnue_weights.bin beside it
+    meta = match.compute_engine_meta(engine_path)
+    assert meta["engine_weights_path"] is None
+    assert meta["engine_weights_size"] is None
+    assert meta["engine_weights_sha256"] is None
+    assert meta["engine_path"] == os.path.realpath(engine_path), \
+        "the engine path itself must still be recorded even with no weights file"
+
+
+def test_compute_engine_meta_handles_non_git_repo():
+    engine_path, _, _ = _make_fake_engine_dir()
+    non_git_dir = os.path.join(TMP_DIR, "not_a_git_repo")
+    os.makedirs(non_git_dir, exist_ok=True)
+    meta = match.compute_engine_meta(engine_path, repo=non_git_dir)
+    assert meta["git_commit"] is None, "must not raise, and must not fake a commit, outside a git checkout"
+
+
+def test_game_record_includes_engine_provenance_for_a_win():
+    engine_path, weights_path, weights_bytes = _make_fake_engine_dir()
+    meta = match.compute_engine_meta(engine_path)
+    log_path = _log_path("provenance_win")
+    api = make_scripted_api({
+        "analysis/new": [state("gp1", to_move=0)],
+        "game/move": [state("gp1", to_move=1),
+                      state("gp1", to_move=0, finished=True, winner=0)],
+        "ai/think": [{"moves": [{"hole": 3, "N": 10}], "best": 3}],
+    })
+    outcome = match.play_game(api, FakeEngine(move=0), our_seat=0, level="i", move_ms=100,
+                              pick="argmax", their_sims=90, log_path=log_path, idx=0,
+                              engine_meta=meta)
+    assert outcome["result"] == "W"
+    rows = read_jsonl(log_path)
+    assert rows[0]["engine_path"] == meta["engine_path"]
+    assert rows[0]["engine_weights_path"] == os.path.realpath(weights_path)
+    assert rows[0]["engine_weights_size"] == len(weights_bytes)
+    assert rows[0]["engine_weights_sha256"] == hashlib.sha256(weights_bytes).hexdigest()
+    assert rows[0]["git_commit"] == _real_git_head()
+
+
+def test_void_game_record_also_includes_engine_provenance():
+    """Provenance must be recorded on VOID games too -- a void game still needs to be
+    attributable to an engine build when reconciling a run's log afterwards."""
+    engine_path, weights_path, weights_bytes = _make_fake_engine_dir()
+    meta = match.compute_engine_meta(engine_path)
+    log_path = _log_path("provenance_void")
+    api = make_scripted_api({
+        "analysis/new": [state("gp2", to_move=0),
+                         RuntimeError("analysis/new: HTTP 500 their server is down")],
+        "game/move": [match.GameNotFoundError("game/move: HTTP 404 Партия не найдена")],
+        "ai/think": [],
+    })
+    outcome = match.play_game(api, FakeEngine(move=0), our_seat=0, level="i", move_ms=100,
+                              pick="argmax", their_sims=90, log_path=log_path, idx=0,
+                              engine_meta=meta)
+    assert outcome["result"] == "VOID"
+    rows = read_jsonl(log_path)
+    assert rows[0]["engine_weights_sha256"] == hashlib.sha256(weights_bytes).hexdigest()
+    assert rows[0]["git_commit"] == _real_git_head()
+
+
+def test_game_record_engine_provenance_defaults_to_none_without_engine_meta():
+    """Existing callers that don't pass engine_meta (e.g. older scripts) must not crash --
+    the new fields are simply present and None, never a KeyError."""
+    log_path = _log_path("provenance_absent")
+    api = make_scripted_api({
+        "analysis/new": [state("gp3", to_move=0)],
+        "game/move": [state("gp3", to_move=0, finished=True, winner=0)],
+        "ai/think": [],
+    })
+    outcome = match.play_game(api, FakeEngine(move=0), our_seat=0, level="i", move_ms=100,
+                              pick="argmax", their_sims=90, log_path=log_path, idx=0)
+    assert outcome["result"] == "W"
+    rows = read_jsonl(log_path)
+    assert rows[0]["engine_path"] is None and rows[0]["git_commit"] is None
+
+
+def test_build_summary_includes_engine_provenance_and_score():
+    engine_path, weights_path, weights_bytes = _make_fake_engine_dir()
+    meta = match.compute_engine_meta(engine_path)
+    agg = {"w": 3, "d": 1, "l": 1, "n": 5, "void": 1, "recovered": 2}
+    summary = match.build_summary(meta, agg, num_results=6,
+                                  args={"level": "i", "mode": "analysis", "pick": "argmax", "move_ms": 1000},
+                                  log_path="data/9qum/matches/match_123.jsonl")
+    assert summary["engine_path"] == meta["engine_path"]
+    assert summary["engine_weights_sha256"] == hashlib.sha256(weights_bytes).hexdigest()
+    assert summary["git_commit"] == _real_git_head()
+    assert summary["w"] == 3 and summary["d"] == 1 and summary["l"] == 1 and summary["n"] == 5
+    assert summary["void"] == 1 and summary["num_results"] == 6
+    assert abs(summary["score"] - (3 + 0.5 * 1) / 5) < 1e-9
+    assert summary["level"] == "i" and summary["mode"] == "analysis"
+    assert summary["log_path"] == "data/9qum/matches/match_123.jsonl"
+
+
+# --------------------------------------------------------------------------
+# opening_suite(): a physically impossible position must never become an opening
+# (defect 5's validator, wired in here) -- it must be skipped, with the rest of the
+# suite still usable, not silently used as if it were a real game state.
+# --------------------------------------------------------------------------
+def test_opening_suite_skips_invalid_position_and_keeps_valid_one():
+    valid_board = {"pits": [9] * 18, "kazan": [0, 0], "tuzdyk": [None, None], "to_move": 0}
+    invalid_board = {"pits": [9] * 18, "kazan": [1, 0], "tuzdyk": [None, None], "to_move": 0}  # sums to 163
+    rows = [
+        {"depth": 4, "line": "valid-line", "data": {"board": valid_board,
+                                                     "moves": [{"count": 100}]}},
+        {"depth": 4, "line": "invalid-line", "data": {"board": invalid_board,
+                                                       "moves": [{"count": 100}]}},
+    ]
+    openings_path = os.path.join(TMP_DIR, "openings_with_one_invalid.jsonl")
+    with open(openings_path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r) + "\n")
+
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        suite = match.opening_suite(openings_path, plies=4, min_count=50, n=10)
+
+    assert len(suite) == 1, "the invalid-sum position must be skipped, not included"
+    assert suite[0]["line"] == "valid-line"
+    assert "invalid-line" in captured.getvalue() and "162" in captured.getvalue(), \
+        "skipping an invalid opening must be visible, not silent"
+
+
 TESTS = [
     test_api_post_raises_game_not_found_on_404,
     test_api_post_detects_not_found_message_even_off_404,
@@ -293,6 +461,14 @@ TESTS = [
     test_void_after_exhausting_the_recovery_budget,
     test_aggregate_excludes_void_from_totals_and_counts_recoveries,
     test_aggregate_all_void_gives_zero_counted_not_a_zero_score_loss,
+    test_compute_engine_meta_reads_weights_size_sha256_and_git_commit,
+    test_compute_engine_meta_handles_missing_weights_file,
+    test_compute_engine_meta_handles_non_git_repo,
+    test_game_record_includes_engine_provenance_for_a_win,
+    test_void_game_record_also_includes_engine_provenance,
+    test_game_record_engine_provenance_defaults_to_none_without_engine_meta,
+    test_build_summary_includes_engine_provenance_and_score,
+    test_opening_suite_skips_invalid_position_and_keeps_valid_one,
 ]
 
 
@@ -301,6 +477,7 @@ if __name__ == "__main__":
     try:
         for t in TESTS:
             t()
-        print(f"OK: board-expiry recovery + void accounting ({len(TESTS)}/{len(TESTS)})")
+        print(f"OK: board-expiry recovery + void accounting + engine provenance + opening "
+              f"validation ({len(TESTS)}/{len(TESTS)})")
     finally:
         shutil.rmtree(TMP_DIR, ignore_errors=True)

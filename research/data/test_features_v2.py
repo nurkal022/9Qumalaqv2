@@ -59,7 +59,57 @@ def test_matches_rust_on_real_positions():
         assert bucket == fv.phase_bucket(st["pits"]), f"bucket mismatch at {pos}"
 
 
+def test_validate_position_accepts_legal_and_rejects_invalid():
+    """The validator is the fix for a real incident: a hand-typed position summing to
+    105 (not 162) was used as evidence for a scale-mismatch diagnosis and had to be
+    retracted (see .superpowers/sdd/2026-07-31-beat-9qum-phase-a/progress.md:46). One
+    legal position must pass; each of three distinct invariant violations must be
+    rejected with a message naming the actual problem."""
+    # A real, physically-reachable position: 44 stones still in pits, 118 in the two
+    # kazans, one tuzdyk per side -- 44 + 118 == 162.
+    legal_pits = [3, 0, 5, 2, 0, 4, 1, 6, 0, 0, 7, 2, 0, 3, 1, 0, 4, 6]
+    assert sum(legal_pits) == 44
+    legal_kazan = [67, 51]
+    legal_tuzdyk = [12, 3]     # white's tuzdyk on black's row (9..17); black's on white's (0..8)
+    legal_to_move = 1
+
+    fv.validate_position(legal_pits, legal_kazan, legal_tuzdyk, legal_to_move)  # must not raise
+
+    # 1) wrong stone total: bump one pit by 1 -> sums to 163, not 162.
+    bad_total = list(legal_pits)
+    bad_total[0] += 1
+    try:
+        fv.validate_position(bad_total, legal_kazan, legal_tuzdyk, legal_to_move)
+    except fv.InvalidPositionError as exc:
+        assert "163" in str(exc) and "162" in str(exc), f"message doesn't name the totals: {exc}"
+    else:
+        raise AssertionError("expected InvalidPositionError for a wrong stone total")
+
+    # 2) negative count.
+    bad_negative = list(legal_pits)
+    bad_negative[4] = -1
+    try:
+        fv.validate_position(bad_negative, legal_kazan, legal_tuzdyk, legal_to_move)
+    except fv.InvalidPositionError as exc:
+        assert "negative" in str(exc) and "pit 4" in str(exc), f"message doesn't name the negative pit: {exc}"
+    else:
+        raise AssertionError("expected InvalidPositionError for a negative pit count")
+
+    # 3) tuzdyk on the wrong side: 3 is a legal pit for tuzdyk[1] (0..8) but not
+    #    tuzdyk[0] (9..17) -- exactly the "physically impossible" shape of mistake.
+    bad_tuzdyk = [3, None]
+    try:
+        fv.validate_position(legal_pits, legal_kazan, bad_tuzdyk, legal_to_move)
+    except fv.InvalidPositionError as exc:
+        assert "tuzdyk[0]" in str(exc) and "OTHER side" in str(exc), f"message unclear: {exc}"
+    else:
+        raise AssertionError("expected InvalidPositionError for a tuzdyk on the wrong side")
+
+    print("OK: validate_position accepts a legal position and rejects 3 invalid ones (4/4)")
+
+
 if __name__ == "__main__":
     test_start_position()
     test_matches_rust_on_real_positions()
     print("OK: Python and Rust feature builders agree (2/2)")
+    test_validate_position_accepts_legal_and_rejects_invalid()

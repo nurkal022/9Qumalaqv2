@@ -16,8 +16,10 @@ Usage:
   python3 tools/9qum/match.py --games 20 --move-ms 2000 --parallel 3 --level i
 """
 import argparse
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -29,6 +31,8 @@ import requests
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools" / "playok"))
 from engine import Engine  # noqa: E402  (repo-local helper)
+sys.path.insert(0, str(REPO / "research" / "data"))
+import features_v2 as fv  # noqa: E402  (repo-local helper: shared position validator)
 
 BASE = "https://9qum.com/api"
 UA = "9qumalaq-research/1.0 (friendly engine research; contact via 9qum founder)"
@@ -117,6 +121,62 @@ class Api:
 START = {"pits": [9] * 18, "kazan": [0, 0], "tuzdyk": [None, None], "to_move": 0}
 
 
+def compute_engine_meta(engine_path, repo=REPO):
+    """Identify which engine build + weights + code produced a match, once per run.
+
+    Without this, telling two runs apart meant reconstructing which engine played
+    which games by scraping game ids out of log files -- error-prone, and it already
+    caused two runs to be mis-grouped in an analysis. This is attached to every game
+    record AND the final summary (see build_summary) so a reader never has to guess.
+    """
+    engine_path = Path(engine_path).resolve()
+    weights_path = engine_path.parent / "nnue_weights.bin"
+    weights_size = weights_sha256 = None
+    if weights_path.is_file():
+        try:
+            data = weights_path.read_bytes()
+            weights_size = len(data)
+            weights_sha256 = hashlib.sha256(data).hexdigest()
+        except OSError:
+            pass  # unreadable: leave size/sha256 as None rather than failing the match
+
+    git_commit = None
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        if out.returncode == 0:
+            git_commit = out.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass  # not a git checkout, or git unavailable: leave None rather than failing
+
+    return {
+        "engine_path": str(engine_path),
+        "engine_weights_path": str(weights_path) if weights_path.is_file() else None,
+        "engine_weights_size": weights_size,
+        "engine_weights_sha256": weights_sha256,
+        "git_commit": git_commit,
+    }
+
+
+def build_summary(engine_meta, agg, num_results, args, log_path):
+    """The final summary for one match run: aggregate score plus the same engine
+    provenance recorded on every game record, so the summary alone (without opening
+    the log) says which engine+weights+commit produced it."""
+    w, d, l, n = agg["w"], agg["d"], agg["l"], agg["n"]
+    score = (w + 0.5 * d) / n if n else 0.0
+    return {
+        **engine_meta,
+        **agg,
+        "score": score,
+        "elo": elo(score, n),
+        "num_results": num_results,
+        "level": args.get("level"), "mode": args.get("mode"), "pick": args.get("pick"),
+        "move_ms": args.get("move_ms"),
+        "log_path": log_path,
+        "ts": int(time.time()),
+    }
+
+
 def opening_suite(path, plies, min_count, n):
     """A balanced opening suite from the harvested 9qum opening tree.
 
@@ -139,6 +199,17 @@ def opening_suite(path, plies, min_count, n):
             board = node["data"].get("board") or {}
             games = sum(m.get("count", 0) for m in node["data"].get("moves", []))
             if games >= min_count and board.get("pits"):
+                try:
+                    fv.validate_position(board["pits"], board["kazan"],
+                                         board.get("tuzdyk") or [None, None],
+                                         board.get("to_move"))
+                except fv.InvalidPositionError as exc:
+                    # A physically impossible position from the harvested tree must
+                    # never be used as a real opening (see fv.InvalidPositionError's
+                    # docstring for the incident this guards against) -- skip just this
+                    # line rather than crashing the whole suite load over one bad row.
+                    print(f"WARNING: skipping opening line {node.get('line')!r}: {exc}")
+                    continue
                 lines.append((games, node["line"], board))
     lines.sort(reverse=True, key=lambda x: x[0])
     return [{"line": ln, "games": g,
@@ -155,7 +226,7 @@ def _position_of(st):
 
 
 def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, idx, mode="analysis",
-              opening=None, max_recoveries=MAX_RECOVERIES_PER_GAME):
+              opening=None, max_recoveries=MAX_RECOVERIES_PER_GAME, engine_meta=None):
     """One game. In `analysis` mode the board is an analysis board: we may post moves for
     both sides, so their net plays argmax(visits) — full strength. In `ai-game` mode the
     server owns the AI side and only accepts its own (mix/drop-randomised) choice.
@@ -166,7 +237,12 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
     per game by `max_recoveries`; if it is exhausted, or recreation itself fails, the
     game is abandoned and returned/logged as VOID instead of raising (which would kill
     the whole match) or being folded into the win/draw/loss counts as a loss.
+
+    `engine_meta` (see compute_engine_meta) is stamped onto every record -- win, loss,
+    draw or void -- so which engine build/weights/commit produced a game is never left
+    to be reconstructed from game ids in a log file after the fact.
     """
+    engine_meta = engine_meta or {}
     recoveries = 0
     gid = None
     st = None
@@ -227,6 +303,11 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
                "our_seat": our_seat, "level": level, "pick": pick, "move_ms": move_ms,
                "result": "VOID", "void_reason": void_reason, "recoveries": recoveries,
                "plies": plies, "kazan": (st or {}).get("kazan"), "tuzdyk": (st or {}).get("tuzdyk"),
+               "engine_path": engine_meta.get("engine_path"),
+               "engine_weights_path": engine_meta.get("engine_weights_path"),
+               "engine_weights_size": engine_meta.get("engine_weights_size"),
+               "engine_weights_sha256": engine_meta.get("engine_weights_sha256"),
+               "git_commit": engine_meta.get("git_commit"),
                "ts": int(time.time())}
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -242,6 +323,11 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
            "move_ms": move_ms, "result": result, "winner": winner, "plies": plies,
            "kazan": st.get("kazan"), "tuzdyk": st.get("tuzdyk"), "record": st.get("record"),
            "tfen": st.get("tfen"), "net_version": st.get("net_version"), "recoveries": recoveries,
+           "engine_path": engine_meta.get("engine_path"),
+           "engine_weights_path": engine_meta.get("engine_weights_path"),
+           "engine_weights_size": engine_meta.get("engine_weights_size"),
+           "engine_weights_sha256": engine_meta.get("engine_weights_sha256"),
+           "git_commit": engine_meta.get("git_commit"),
            "ts": int(time.time())}
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -309,7 +395,15 @@ def main():
         if a.opening_plies else []
     if a.opening_plies and not suite:
         print("WARNING: no opening suite found — every game would repeat one line")
+
+    # Computed once per run and stamped on every game record + the final summary (see
+    # compute_engine_meta/build_summary) so which engine build/weights/commit produced
+    # this match is never left to be reconstructed from game ids after the fact.
+    engine_meta = compute_engine_meta(a.engine)
     print(f"our engine: {a.engine} @ {a.move_ms}ms/move")
+    print(f"  weights:  {engine_meta['engine_weights_path']} "
+          f"(sha256 {engine_meta['engine_weights_sha256']})")
+    print(f"  git commit: {engine_meta['git_commit']}")
     if suite:
         print(f"openings:   {len(suite)} distinct {a.opening_plies}-ply lines, each played from both sides")
     print(f"their AI:   level '{a.level}', mode={a.mode}, pick={a.pick}  ->  {log_path}")
@@ -325,7 +419,7 @@ def main():
         try:
             op = suite[(idx // 2) % len(suite)] if suite else None
             return play_game(api, e, idx % 2, a.level, a.move_ms, a.pick, a.their_sims, log_path, idx,
-                             a.mode, op)
+                             a.mode, op, engine_meta=engine_meta)
         finally:
             e.stop()
 
@@ -345,6 +439,15 @@ def main():
         print(f"  CAVEAT: {agg['void']}/{len(results)} games were VOID (board unrecoverable within "
               f"{MAX_RECOVERIES_PER_GAME} tries) and are excluded from the score above — "
               f"see void_reason per game in {log_path}.")
+
+    summary = build_summary(engine_meta, agg, len(results),
+                            {"level": a.level, "mode": a.mode, "pick": a.pick, "move_ms": a.move_ms},
+                            log_path)
+    summary_path = log_path[:-len(".jsonl")] + "_summary.json" if log_path.endswith(".jsonl") \
+        else log_path + "_summary.json"
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=1)
+    print(f"wrote summary {summary_path}")
 
 
 if __name__ == "__main__":
