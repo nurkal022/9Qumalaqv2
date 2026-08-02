@@ -283,6 +283,95 @@ def test_result_for_us_draw_on_none():
 
 
 # --------------------------------------------------------------------------
+# find_table_by_id / find_table_by_creator / find_table_with_both_seated -- the
+# --mode challenge/invite table-acquisition helpers, tolerant of the same push-shape
+# variety as extract_game_state (a lobby snapshot's `tables` list, a `table` key, or
+# the payload already looking like a table).
+# --------------------------------------------------------------------------
+def test_find_table_by_id_direct_payload():
+    payload = {"id": "t9", "seats": [None, {"name": "x"}]}
+    assert lp.find_table_by_id(payload, "t9") == payload
+
+
+def test_find_table_by_id_nested_table_key():
+    inner = {"id": "t9", "seats": [None, None]}
+    payload = {"type": "table.update", "table": inner}
+    assert lp.find_table_by_id(payload, "t9") == inner
+
+
+def test_find_table_by_id_from_tables_list():
+    inner = {"id": "t9", "seats": [None, None]}
+    payload = {"type": "lobby", "tables": [{"id": "other"}, inner]}
+    assert lp.find_table_by_id(payload, "t9") == inner
+
+
+def test_find_table_by_id_returns_none_when_absent():
+    assert lp.find_table_by_id({"type": "lobby", "tables": []}, "t9") is None
+    assert lp.find_table_by_id(None, "t9") is None
+
+
+def test_find_table_by_creator_matches_even_with_no_seats_filled():
+    """Regression test for a real observed 9qum push: table.create's own table.state
+    response came back with seats=[None, None] (the creator is NOT auto-seated) but a
+    top-level `creator` field naming us -- this must still be found."""
+    table = _table(id="new1", creator="Qonaq_5599", seats=[None, None])
+    payload = {"type": "table.state", **table}
+    assert lp.find_table_by_creator(payload, "Qonaq_5599") == payload
+
+
+def test_find_table_by_creator_from_tables_list():
+    table = _table(id="new1", creator="Qonaq_5599", seats=[None, None])
+    payload = {"type": "lobby", "tables": [_table(id="unrelated", creator="someone else"), table]}
+    assert lp.find_table_by_creator(payload, "Qonaq_5599")["id"] == "new1"
+
+
+def test_find_table_by_creator_returns_none_when_absent():
+    payload = {"type": "lobby", "tables": [_table(creator="someone else")]}
+    assert lp.find_table_by_creator(payload, "Qonaq_5599") is None
+
+
+def test_find_table_with_both_seated_matches_paired_table():
+    table = _table(id="pair1", seats=[{"name": "Qonaq_5599", "rating": 2000},
+                                       {"name": "ИИ 9qum", "rating": 2175}])
+    payload = {"type": "lobby", "tables": [_table(id="unrelated"), table]}
+    t, seat = lp.find_table_with_both_seated(payload, "Qonaq_5599", "ИИ 9qum")
+    assert t["id"] == "pair1" and seat == 0
+
+
+def test_find_table_with_both_seated_none_when_opponent_absent():
+    payload = {"type": "lobby", "tables": [_table(seats=[{"name": "Qonaq_5599"}, None])]}
+    t, seat = lp.find_table_with_both_seated(payload, "Qonaq_5599", "ИИ 9qum")
+    assert t is None and seat is None
+
+
+# --------------------------------------------------------------------------
+# build_settings / verify_settings_recorded
+# --------------------------------------------------------------------------
+def test_build_settings_shape():
+    s = lp.build_settings(False, 7.0, 2)
+    assert s == {"rated": False, "tc": {"timeMin": 7.0, "fischer": 2}}
+
+
+def test_build_settings_coerces_truthy_rated():
+    assert lp.build_settings(1, 5, 3)["rated"] is True
+
+
+def test_verify_settings_recorded_matches_when_equal():
+    v = lp.verify_settings_recorded({"rated": False, "access": "open", "tc": {"timeMin": 7}}, False)
+    assert v == {"requested_rated": False, "server_rated": False, "access": "open",
+                 "tc": {"timeMin": 7}, "matches": True}
+
+
+def test_verify_settings_recorded_flags_mismatch():
+    """The main open question this task exists to answer: whether the server honours
+    an unrated request at all. If it silently returns a rated table, this must be
+    reported as a mismatch, not treated as success."""
+    v = lp.verify_settings_recorded({"rated": True, "access": "open", "tc": {"timeMin": 7}}, False)
+    assert v["matches"] is False
+    assert v["requested_rated"] is False and v["server_rated"] is True
+
+
+# --------------------------------------------------------------------------
 # WsClient: logging + wire format, WITHOUT spawning any subprocess
 # --------------------------------------------------------------------------
 def _bare_wsclient(fh, stdin=None, opened=True):
@@ -627,6 +716,170 @@ def test_main_illegal_engine_move_aborts_resigns_and_leaves():
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+# --------------------------------------------------------------------------
+# main(): --mode challenge / --mode invite, same fake-WsClient/fake-Engine harness.
+# No test here opens a real socket.
+# --------------------------------------------------------------------------
+def test_main_dry_run_challenge_reports_settings_and_never_sends_challenge():
+    tmpdir = tempfile.mkdtemp(prefix="ladder_play_test_")
+    try:
+        session = _session_file(tmpdir)
+        events = [AUTH_OK, _lobby_evt([])]
+        argv = ["ladder_play.py", "--dry-run", "--mode", "challenge", "--session", session,
+                "--log-dir", tmpdir, "--opponent", "ИИ 9qum", "--max-wait", "1"]
+        rc, record, ws, _engines = _run_main(argv, events)
+        assert rc == 0
+        assert record["outcome"] == "dry_run_ok"
+        assert record["would_send"] == {"type": "game.challenge", "to": "ИИ 9qum",
+                                         "rated": False, "tc": {"timeMin": 7.0, "fischer": 2}}
+        sent_types = [m.get("type") for m in ws.sent]
+        assert sent_types == ["auth"], sent_types  # never actually sent game.challenge
+        assert ws.closed is True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_main_challenge_accepted_plays_and_leaves_no_join_sit_sent():
+    """A `game.challenge` acceptance shows up as a table (server-assigned id, unknown
+    to us up front) where both we and the opponent are seated -- unlike --mode sit,
+    there is no table.join/table.sit to send at all."""
+    tmpdir = tempfile.mkdtemp(prefix="ladder_play_test_")
+    try:
+        session = _session_file(tmpdir)
+        paired = _table(id="c1", rated=False,
+                         seats=[{"name": "Qonaq_5599", "rating": 2000},
+                                {"name": "ИИ 9qum", "rating": 2175}])
+        s0 = {"pits": [9] * 18, "kazan": [0, 0], "tuzdyk": [None, None], "to_move": 1,
+              "finished": False, "winner": None, "legal_moves": list(range(9))}
+        s1 = dict(s0, to_move=0, kazan=[0, 0])
+        s2 = dict(s0, to_move=1, kazan=[9, 0], finished=True, winner=0)
+        push0 = {"event": "message", "payload": {"id": "c1", "game": s0}}
+        push1 = {"event": "message", "payload": {"id": "c1", "game": s1}}
+        push2 = {"event": "message", "payload": {"id": "c1", "game": s2}}
+        events = [
+            AUTH_OK,
+            _lobby_evt([]),           # initial lobby snapshot, no tables yet
+            _lobby_evt([paired]),     # opponent accepted -> a paired table appears
+            push0, push1, push2,
+        ]
+        argv = ["ladder_play.py", "--mode", "challenge", "--session", session,
+                "--log-dir", tmpdir, "--opponent", "ИИ 9qum", "--max-wait", "5"]
+        rc, record, ws, engines = _run_main(argv, events, engine_moves=[3])
+        assert rc == 0
+        assert record["outcome"] == "completed"
+        assert record["result"] == "win"
+        assert record["our_seat"] == 0
+        assert record["target_table"]["id"] == "c1"
+        assert record["settings_verification"]["matches"] is True
+        kinds = [s["type"] for s in ws.sent]
+        assert kinds == ["auth", "game.challenge", "game.move", "table.leave"], kinds
+        assert ws.closed is True
+        assert engines[0].started and engines[0].stopped
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_main_challenge_ignored_reports_declined_and_sends_only_auth_and_challenge():
+    tmpdir = tempfile.mkdtemp(prefix="ladder_play_test_")
+    try:
+        session = _session_file(tmpdir)
+        events = [AUTH_OK, _lobby_evt([])]  # opponent never shows up seated with us
+        argv = ["ladder_play.py", "--mode", "challenge", "--session", session,
+                "--log-dir", tmpdir, "--opponent", "ИИ 9qum", "--max-wait", "0.3"]
+        rc, record, ws, _engines = _run_main(argv, events)
+        assert rc == 0
+        assert record["outcome"] == "opponent_declined_or_ignored"
+        sent_types = [m.get("type") for m in ws.sent]
+        # nothing to clean up -- we never held a table (no join/sit, no leave/resign)
+        assert sent_types == ["auth", "game.challenge"], sent_types
+        assert ws.closed is True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_main_invite_accepted_unrated_table_matches_request():
+    """--unrated is the default; when the server's readback of our created table
+    genuinely says rated=False, settings_verification must report a match.
+
+    Event shapes mirror a real observed 9qum exchange: table.create's own readback
+    has seats=[None, None] and only a `creator` field (the creator is NOT auto-seated
+    -- see find_table_by_creator's docstring), so main() must itself send table.sit
+    before table.invite; the opponent then appears in the OTHER seat once accepted."""
+    tmpdir = tempfile.mkdtemp(prefix="ladder_play_test_")
+    try:
+        session = _session_file(tmpdir)
+        created = _table(id="inv1", rated=False, access="open", creator="Qonaq_5599",
+                          seats=[None, None])
+        accepted = dict(created, seats=[{"name": "Qonaq_5599", "rating": 2000},
+                                         {"name": "ИИ 9qum", "rating": 2175}])
+        s0 = {"pits": [9] * 18, "kazan": [0, 0], "tuzdyk": [None, None], "to_move": 1,
+              "finished": False, "winner": None, "legal_moves": list(range(9))}
+        s1 = dict(s0, to_move=0, kazan=[0, 0])
+        s2 = dict(s0, to_move=1, kazan=[9, 0], finished=True, winner=0)
+        push0 = {"event": "message", "payload": {"id": "inv1", "game": s0}}
+        push1 = {"event": "message", "payload": {"id": "inv1", "game": s1}}
+        push2 = {"event": "message", "payload": {"id": "inv1", "game": s2}}
+        events = [
+            AUTH_OK,
+            _lobby_evt([]),             # initial lobby
+            {"event": "message", "payload": {"type": "table.state", **created}},  # readback
+            _lobby_evt([accepted]),     # we sat + opponent joined -> accepted
+            push0, push1, push2,
+        ]
+        argv = ["ladder_play.py", "--mode", "invite", "--unrated", "--session", session,
+                "--log-dir", tmpdir, "--opponent", "ИИ 9qum", "--max-wait", "5"]
+        rc, record, ws, engines = _run_main(argv, events, engine_moves=[3])
+        assert rc == 0
+        assert record["outcome"] == "completed"
+        assert record["result"] == "win"
+        assert record["our_seat"] == 0
+        v = record["settings_verification"]
+        assert v == {"requested_rated": False, "server_rated": False, "access": "open",
+                     "tc": {"timeMin": 7, "fischer": 2}, "matches": True}
+        kinds = [s["type"] for s in ws.sent]
+        assert kinds == ["auth", "table.create", "table.sit", "table.invite",
+                          "game.move", "table.leave"], kinds
+        assert ws.closed is True
+        assert engines[0].started and engines[0].stopped
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_main_invite_server_returns_rated_table_reports_mismatch_and_leaves():
+    """The main open question this task exists to answer: if we ask for --unrated and
+    the server hands back a table with rated=True anyway, that must be reported as a
+    mismatch (not silently trusted), and since nobody ever joins in this script, cleanup
+    must leave/cancel the table we created without sending a meaningless game.resign
+    (no game -- and so no second player -- ever existed)."""
+    tmpdir = tempfile.mkdtemp(prefix="ladder_play_test_")
+    try:
+        session = _session_file(tmpdir)
+        created_rated = _table(id="inv2", rated=True, access="open", creator="Qonaq_5599",
+                                seats=[None, None])
+        events = [
+            AUTH_OK,
+            _lobby_evt([]),
+            # server recorded rated=True despite --unrated
+            {"event": "message", "payload": {"type": "table.state", **created_rated}},
+        ]
+        argv = ["ladder_play.py", "--mode", "invite", "--unrated", "--session", session,
+                "--log-dir", tmpdir, "--opponent", "ИИ 9qum", "--max-wait", "0.3"]
+        rc, record, ws, _engines = _run_main(argv, events)
+        assert rc == 0
+        assert record["outcome"] == "opponent_declined_or_ignored"
+        v = record["settings_verification"]
+        assert v["matches"] is False
+        assert v["requested_rated"] is False
+        assert v["server_rated"] is True
+        kinds = [s["type"] for s in ws.sent]
+        # table.sit (our own seat) + table.leave to cancel the table we created, but NO
+        # game.resign -- no game (and no second player) ever existed for this run.
+        assert kinds == ["auth", "table.create", "table.sit", "table.invite", "table.leave"], kinds
+        assert ws.closed is True
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 TESTS = [
     test_find_target_table_matches_open_waiting_free_seat,
     test_find_target_table_picks_correct_free_seat_when_bot_is_seat0,
@@ -669,6 +922,19 @@ TESTS = [
     test_result_for_us_loss,
     test_result_for_us_draw_on_minus_one,
     test_result_for_us_draw_on_none,
+    test_find_table_by_id_direct_payload,
+    test_find_table_by_id_nested_table_key,
+    test_find_table_by_id_from_tables_list,
+    test_find_table_by_id_returns_none_when_absent,
+    test_find_table_by_creator_matches_even_with_no_seats_filled,
+    test_find_table_by_creator_from_tables_list,
+    test_find_table_by_creator_returns_none_when_absent,
+    test_find_table_with_both_seated_matches_paired_table,
+    test_find_table_with_both_seated_none_when_opponent_absent,
+    test_build_settings_shape,
+    test_build_settings_coerces_truthy_rated,
+    test_verify_settings_recorded_matches_when_equal,
+    test_verify_settings_recorded_flags_mismatch,
     test_wsclient_log_format_records_direction_and_payload,
     test_wsclient_send_writes_wire_format_to_bridge_stdin_and_logs_it,
     test_wsclient_send_raises_if_socket_never_opens,
@@ -681,6 +947,11 @@ TESTS = [
     test_main_opponent_unavailable_within_max_wait_does_not_join,
     test_main_full_game_plays_moves_records_result_and_leaves_cleanly,
     test_main_illegal_engine_move_aborts_resigns_and_leaves,
+    test_main_dry_run_challenge_reports_settings_and_never_sends_challenge,
+    test_main_challenge_accepted_plays_and_leaves_no_join_sit_sent,
+    test_main_challenge_ignored_reports_declined_and_sends_only_auth_and_challenge,
+    test_main_invite_accepted_unrated_table_matches_request,
+    test_main_invite_server_returns_rated_table_reports_mismatch_and_leaves,
 ]
 
 

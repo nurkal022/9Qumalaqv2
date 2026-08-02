@@ -21,6 +21,17 @@ Usage:
   python3.12 tools/9qum/ladder_play.py --dry-run
   python3.12 tools/9qum/ladder_play.py --opponent "ИИ 9qum" --max-wait 180
 
+Three `--mode`s reach a seat differently, then share the same play loop:
+  sit       (default, today's behaviour) join a table where the opponent is already
+            waiting with an open, non-closed seat -- see find_target_table.
+  challenge send `game.challenge` to --opponent directly from the lobby; the opponent
+            may accept (a table appears with both of us seated) or never respond.
+  invite    create our own table (`table.create`) with settings we choose (in
+            particular --rated/--unrated, default unrated), then `table.invite`
+            --opponent to it. Either way, if the opponent never accepts within
+            --max-wait, this is reported as `opponent_declined_or_ignored` and cleaned
+            up rather than retried or left hanging.
+
 Position/engine plumbing is reused, not reimplemented: `pos_from_state` is imported
 from tools/9qum/match.py (the already-tested tuzdyk absolute->relative conversion), and
 the engine subprocess wrapper is tools/playok/engine.py's `Engine`.
@@ -335,6 +346,93 @@ def result_for_us(game: dict, our_seat: int) -> str:
 
 
 # --------------------------------------------------------------------------
+# Table acquisition for --mode challenge/invite: unlike `sit`, the table involved
+# isn't known from a pre-existing lobby entry -- it either doesn't exist yet
+# (challenge, until accepted) or was just created by us (invite). These helpers are
+# deliberately tolerant of the exact push shape (a full lobby snapshot's `tables`
+# list, a single table wrapped in a `table` key, or a message that already looks like
+# a table) for the same reason extract_game_state is: the brief documents fields, not
+# a specific `type` string for every push.
+# --------------------------------------------------------------------------
+def _candidate_tables(payload: dict):
+    """Every table-shaped dict reachable from an arbitrary pushed payload."""
+    if not isinstance(payload, dict):
+        return
+    if "seats" in payload or "id" in payload:
+        yield payload
+    table = payload.get("table")
+    if isinstance(table, dict):
+        yield table
+    for t in payload.get("tables", []) or []:
+        if isinstance(t, dict):
+            yield t
+
+
+def find_table_by_id(payload: dict, table_id: str):
+    """First candidate table in `payload` whose id matches `table_id`, or None. Used
+    by --mode invite to re-read our own just-created table (to detect the opponent
+    joining it) once its id is already known."""
+    for t in _candidate_tables(payload):
+        if t.get("id") == table_id:
+            return t
+    return None
+
+
+def find_table_by_creator(payload: dict, name: str):
+    """First candidate table in `payload` whose `creator` field is `name`, or None.
+    Used by --mode invite right after table.create, before the new table's id is known
+    to us. NOT seat occupancy: a real live probe of 9qum.com found that table.create
+    does NOT auto-seat the creator -- the table.state push it triggers came back with
+    `seats: [None, None]` and a separate top-level `creator` field, so a table we just
+    created must be identified by that field, not by scanning for our name in a seat
+    (which find_table_with_both_seated/find_target_table rightly do for tables OTHER
+    parties already occupy)."""
+    for t in _candidate_tables(payload):
+        if t.get("creator") == name:
+            return t
+    return None
+
+
+def find_table_with_both_seated(payload: dict, name_a: str, name_b: str):
+    """First candidate table in `payload` where both `name_a` and `name_b` occupy a
+    seat. Returns (table, name_a's seat index) or (None, None). Used by --mode
+    challenge, whose table (if the opponent accepts) is server-created with an id we
+    never chose, so it must be found by who's sitting at it rather than by id."""
+    for t in _candidate_tables(payload):
+        seats = t.get("seats") or []
+        names = [s.get("name") if s else None for s in seats]
+        if name_a in names and name_b in names:
+            return t, names.index(name_a)
+    return None, None
+
+
+def build_settings(rated: bool, tc_minutes: float, tc_fischer: int) -> dict:
+    """Minimal table-settings object for game.challenge / table.create. The brief
+    notes the real client spreads its own table-settings UI state into these calls and
+    says to try the minimal form first rather than re-deriving that state; `tc`'s
+    shape (timeMin/fischer) matches every real table this project has observed in a
+    9qum lobby snapshot (including both the closed 'ИИ 9qum' table and the open
+    'ИИ 9qumалак' one, both tc={"timeMin": 7, "fischer": 2})."""
+    return {"rated": bool(rated), "tc": {"timeMin": tc_minutes, "fischer": tc_fischer}}
+
+
+def verify_settings_recorded(table: dict, requested_rated: bool) -> dict:
+    """What the server actually recorded for a table we created/joined via challenge
+    or invite, compared to what we asked for. The brief is explicit that the
+    requested settings must never be assumed honoured -- whether unrated play is even
+    possible at all is the main thing this task exists to establish, so a mismatch
+    must be surfaced loudly, not silently."""
+    server_rated = table.get("rated")
+    return {
+        "requested_rated": requested_rated,
+        "server_rated": server_rated,
+        "access": table.get("access"),
+        "tc": table.get("tc"),
+        "matches": server_rated == requested_rated,
+    }
+
+
+# --------------------------------------------------------------------------
 # Small blocking helpers built on WsClient.next_event
 # --------------------------------------------------------------------------
 def wait_for_type(ws: WsClient, type_name: str, timeout: float):
@@ -360,17 +458,45 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--opponent", default=DEFAULT_OPPONENT,
                     help="exact display name of the opponent bot to play")
+    ap.add_argument("--mode", choices=("sit", "challenge", "invite"), default="sit",
+                    help="'sit' (default, unchanged behaviour): join a waiting table "
+                         "where the opponent already holds an open, non-closed seat. "
+                         "'challenge': send game.challenge to --opponent directly from "
+                         "the lobby. 'invite': create our own table (table.create), "
+                         "then table.invite --opponent to it.")
     ap.add_argument("--engine", default=str(DEFAULT_ENGINE), help="engine binary path")
     ap.add_argument("--max-wait", type=float, default=180.0,
-                    help="seconds to wait for a joinable table with the opponent")
+                    help="seconds to wait for: a joinable table (sit), the opponent to "
+                         "accept a challenge (challenge), or the opponent to accept an "
+                         "invite (invite)")
+    rated_group = ap.add_mutually_exclusive_group()
+    rated_group.add_argument("--rated", dest="rated", action="store_true",
+                              help="request a rated table (challenge/invite only)")
+    rated_group.add_argument("--unrated", dest="rated", action="store_false",
+                              help="request an unrated table (challenge/invite only) "
+                                   "-- the default, since an unrated game has no side "
+                                   "effects on anyone's rating")
+    ap.set_defaults(rated=None)
+    ap.add_argument("--tc-minutes", type=float, default=7.0,
+                    help="base time-control minutes to request for challenge/invite "
+                         "settings (default matches every real table this project has "
+                         "observed in a 9qum lobby snapshot)")
+    ap.add_argument("--tc-fischer", type=int, default=2,
+                    help="fischer increment seconds to request for challenge/invite "
+                         "settings")
     ap.add_argument("--session", default=str(DEFAULT_SESSION))
     ap.add_argument("--log-dir", default=str(DEFAULT_LOG_DIR))
     ap.add_argument("--ws-url", default=WS_URL)
     ap.add_argument("--node-bin", default="node")
     ap.add_argument("--dry-run", action="store_true",
-                    help="observe the lobby and report the table that would be joined; "
-                         "never join/sit/move")
+                    help="sit: observe the lobby and report the table that would be "
+                         "joined, never join/sit/move. challenge/invite: report the "
+                         "settings and message that would be sent, never actually "
+                         "challenge/create/invite.")
     args = ap.parse_args()
+    # args.rated defaults to None (neither --rated nor --unrated given) -> unrated,
+    # per the brief: an unrated game has no side effects on anyone's rating.
+    requested_rated = False if args.rated is None else args.rated
 
     log_dir = Path(args.log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -386,6 +512,7 @@ def main() -> int:
     record = {
         "schema": "ladder_play_game_v1",
         "opponent_requested": args.opponent,
+        "mode": args.mode,
         "dry_run": args.dry_run,
         "engine_path": str(args.engine),
         "started_ts": time.time(),
@@ -393,6 +520,7 @@ def main() -> int:
     }
 
     seated = False
+    own_table_created = False
     game_finished = False
     table_id = None
     our_seat = None
@@ -413,81 +541,232 @@ def main() -> int:
                 raise RuntimeError(f"no lobby push within {LOBBY_TIMEOUT_S}s after auth")
             lobby = lobby_evt["payload"]
 
-            # --- 1. wait for a joinable table with the requested opponent ---
-            deadline = time.time() + args.max_wait
-            target, seat_idx = find_target_table(lobby, args.opponent)
-            while target is None and time.time() < deadline:
-                evt = ws.next_event(timeout=max(0.5, deadline - time.time()))
-                if evt is None:
-                    continue
-                if evt.get("event") == "_bridge_eof":
-                    raise RuntimeError("websocket bridge exited unexpectedly while waiting for a table")
-                if evt.get("event") == "message" and evt.get("payload", {}).get("type") == "lobby":
-                    lobby = evt["payload"]
-                    target, seat_idx = find_target_table(lobby, args.opponent)
+            # --- 1. acquire a table + seat, per --mode ---
+            if args.mode == "sit":
+                deadline = time.time() + args.max_wait
+                target, seat_idx = find_target_table(lobby, args.opponent)
+                while target is None and time.time() < deadline:
+                    evt = ws.next_event(timeout=max(0.5, deadline - time.time()))
+                    if evt is None:
+                        continue
+                    if evt.get("event") == "_bridge_eof":
+                        raise RuntimeError("websocket bridge exited unexpectedly while waiting for a table")
+                    if evt.get("event") == "message" and evt.get("payload", {}).get("type") == "lobby":
+                        lobby = evt["payload"]
+                        target, seat_idx = find_target_table(lobby, args.opponent)
 
-            record["lobby_snapshot"] = summarize_lobby(lobby, args.opponent)
+                record["lobby_snapshot"] = summarize_lobby(lobby, args.opponent)
 
-            if target is None:
-                record["outcome"] = "opponent_unavailable"
-                print(f"'{args.opponent}' was not available at a joinable (waiting/open/"
-                      f"not-closed) table within {args.max_wait:.0f}s.")
-                print(json.dumps(record["lobby_snapshot"], ensure_ascii=False, indent=1))
-                return 0
+                if target is None:
+                    record["outcome"] = "opponent_unavailable"
+                    print(f"'{args.opponent}' was not available at a joinable (waiting/open/"
+                          f"not-closed) table within {args.max_wait:.0f}s.")
+                    print(json.dumps(record["lobby_snapshot"], ensure_ascii=False, indent=1))
+                    return 0
 
-            other_seat = target["seats"][1 - seat_idx]
-            print(f"target table: id={target['id']} no={target.get('no')} "
-                  f"seat={seat_idx} vs {other_seat.get('name')} (rating {other_seat.get('rating')}) "
-                  f"tc={target.get('tc')} rated={target.get('rated')} stake={target.get('stake')}")
-            record["target_table"] = target
-            record["our_seat"] = seat_idx
-            record["time_control"] = target.get("tc")
+                other_seat = target["seats"][1 - seat_idx]
+                print(f"target table: id={target['id']} no={target.get('no')} "
+                      f"seat={seat_idx} vs {other_seat.get('name')} (rating {other_seat.get('rating')}) "
+                      f"tc={target.get('tc')} rated={target.get('rated')} stake={target.get('stake')}")
+                record["target_table"] = target
+                record["our_seat"] = seat_idx
+                record["time_control"] = target.get("tc")
 
-            if args.dry_run:
-                record["outcome"] = "dry_run_ok"
-                print("DRY RUN: stopping here, no join/sit/move sent.")
-                return 0
+                if args.dry_run:
+                    record["outcome"] = "dry_run_ok"
+                    print("DRY RUN: stopping here, no join/sit/move sent.")
+                    return 0
 
-            # --- 2. join + sit ---
-            table_id = target["id"]
-            our_seat = seat_idx
-            ws.send({"type": "table.join", "tableId": table_id})
-            time.sleep(0.5)
-            ws.send({"type": "table.sit", "tableId": table_id, "seat": our_seat})
-            seated = True  # we attempted to occupy a seat; cleanup should try to vacate it either way
+                table_id = target["id"]
+                our_seat = seat_idx
+                ws.send({"type": "table.join", "tableId": table_id})
+                time.sleep(0.5)
+                ws.send({"type": "table.sit", "tableId": table_id, "seat": our_seat})
+                seated = True  # we attempted to occupy a seat; cleanup should try to vacate it either way
 
-            confirmed = False
-            confirm_deadline = time.time() + JOIN_CONFIRM_TIMEOUT_S
-            while time.time() < confirm_deadline:
-                evt = ws.next_event(timeout=max(0.5, confirm_deadline - time.time()))
-                if evt is None:
-                    continue
-                if evt.get("event") == "_bridge_eof":
-                    raise RuntimeError("websocket bridge exited unexpectedly while confirming our seat")
-                err = is_error_event(evt)
-                if err:
-                    raise RuntimeError(f"server rejected table.join/table.sit: {err}")
-                game = extract_game_state(evt, table_id)
-                payload = evt.get("payload") or {}
-                seats = None
-                if payload.get("id") == table_id:
-                    seats = payload.get("seats")
-                elif isinstance(payload.get("table"), dict) and payload["table"].get("id") == table_id:
-                    seats = payload["table"].get("seats")
-                if seats and len(seats) > our_seat and seats[our_seat] and seats[our_seat].get("name") == our_name:
-                    confirmed = True
-                    break
-                if game is not None:
-                    # a game push for our table implies the sit succeeded (a table
-                    # without both seats filled cannot have a live game object)
-                    confirmed = True
-                    break
-            if not confirmed:
-                raise RuntimeError(f"could not confirm seat {our_seat} at table {table_id} "
-                                   f"within {JOIN_CONFIRM_TIMEOUT_S}s")
-            print(f"seated: table={table_id} seat={our_seat}")
+                confirmed = False
+                confirm_deadline = time.time() + JOIN_CONFIRM_TIMEOUT_S
+                while time.time() < confirm_deadline:
+                    evt = ws.next_event(timeout=max(0.5, confirm_deadline - time.time()))
+                    if evt is None:
+                        continue
+                    if evt.get("event") == "_bridge_eof":
+                        raise RuntimeError("websocket bridge exited unexpectedly while confirming our seat")
+                    err = is_error_event(evt)
+                    if err:
+                        raise RuntimeError(f"server rejected table.join/table.sit: {err}")
+                    game = extract_game_state(evt, table_id)
+                    payload = evt.get("payload") or {}
+                    seats = None
+                    if payload.get("id") == table_id:
+                        seats = payload.get("seats")
+                    elif isinstance(payload.get("table"), dict) and payload["table"].get("id") == table_id:
+                        seats = payload["table"].get("seats")
+                    if seats and len(seats) > our_seat and seats[our_seat] and seats[our_seat].get("name") == our_name:
+                        confirmed = True
+                        break
+                    if game is not None:
+                        # a game push for our table implies the sit succeeded (a table
+                        # without both seats filled cannot have a live game object)
+                        confirmed = True
+                        break
+                if not confirmed:
+                    raise RuntimeError(f"could not confirm seat {our_seat} at table {table_id} "
+                                       f"within {JOIN_CONFIRM_TIMEOUT_S}s")
+                print(f"seated: table={table_id} seat={our_seat}")
 
-            # --- 3. play loop ---
+            elif args.mode == "challenge":
+                settings = build_settings(requested_rated, args.tc_minutes, args.tc_fischer)
+                record["requested_settings"] = settings
+                print(f"mode=challenge opponent={args.opponent!r} settings={settings}")
+
+                if args.dry_run:
+                    record["outcome"] = "dry_run_ok"
+                    would_send = {"type": "game.challenge", "to": args.opponent, **settings}
+                    record["would_send"] = would_send
+                    print(f"DRY RUN: would send {would_send}")
+                    return 0
+
+                ws.send({"type": "game.challenge", "to": args.opponent, **settings})
+                print(f"sent game.challenge to {args.opponent!r}; waiting up to "
+                      f"{args.max_wait:.0f}s for acceptance")
+
+                target, seat_idx = None, None
+                deadline = time.time() + args.max_wait
+                while target is None and time.time() < deadline:
+                    evt = ws.next_event(timeout=max(0.5, deadline - time.time()))
+                    if evt is None:
+                        continue
+                    if evt.get("event") == "_bridge_eof":
+                        raise RuntimeError("websocket bridge exited unexpectedly while "
+                                           "waiting for challenge acceptance")
+                    err = is_error_event(evt)
+                    if err:
+                        raise RuntimeError(f"server error after game.challenge: {err}")
+                    if evt.get("event") == "message":
+                        payload = evt.get("payload") or {}
+                        if payload.get("type") == "lobby":
+                            lobby = payload
+                        target, seat_idx = find_table_with_both_seated(payload, our_name, args.opponent)
+
+                record["lobby_snapshot"] = summarize_lobby(lobby, args.opponent)
+
+                if target is None:
+                    record["outcome"] = "opponent_declined_or_ignored"
+                    print(f"'{args.opponent}' did not accept the challenge within "
+                          f"{args.max_wait:.0f}s.")
+                    return 0
+
+                table_id = target["id"]
+                our_seat = seat_idx
+                seated = True  # a real two-party table now exists; cleanup should vacate it
+                record["target_table"] = target
+                record["our_seat"] = our_seat
+                record["time_control"] = target.get("tc")
+                verification = verify_settings_recorded(target, requested_rated)
+                record["settings_verification"] = verification
+                print(f"challenge accepted: table={table_id} seat={our_seat} "
+                      f"server_rated={verification['server_rated']} "
+                      f"requested_rated={verification['requested_rated']} "
+                      f"access={verification['access']} tc={verification['tc']}")
+                if not verification["matches"]:
+                    print(f"WARNING: requested rated={requested_rated} but the server "
+                          f"recorded rated={verification['server_rated']} on this table "
+                          f"-- our settings were NOT honoured as requested!")
+
+            elif args.mode == "invite":
+                settings = build_settings(requested_rated, args.tc_minutes, args.tc_fischer)
+                record["requested_settings"] = settings
+                print(f"mode=invite opponent={args.opponent!r} settings={settings}")
+
+                if args.dry_run:
+                    record["outcome"] = "dry_run_ok"
+                    would_send = {"type": "table.create", **settings}
+                    record["would_send"] = would_send
+                    print(f"DRY RUN: would send {would_send}")
+                    return 0
+
+                ws.send({"type": "table.create", **settings})
+                our_table = None
+                deadline = time.time() + LOBBY_TIMEOUT_S
+                while our_table is None and time.time() < deadline:
+                    evt = ws.next_event(timeout=max(0.5, deadline - time.time()))
+                    if evt is None:
+                        continue
+                    if evt.get("event") == "_bridge_eof":
+                        raise RuntimeError("websocket bridge exited unexpectedly while "
+                                           "waiting for table.create to be acknowledged")
+                    err = is_error_event(evt)
+                    if err:
+                        raise RuntimeError(f"server error after table.create: {err}")
+                    if evt.get("event") == "message":
+                        our_table = find_table_by_creator(evt.get("payload") or {}, our_name)
+                if our_table is None:
+                    raise RuntimeError(f"table.create sent but no table with "
+                                       f"creator={our_name!r} was seen within "
+                                       f"{LOBBY_TIMEOUT_S}s")
+                table_id = our_table["id"]
+                own_table_created = True  # we hold a table now; cleanup must leave/cancel
+                                          # it even if the invite is never accepted
+                record["created_table"] = our_table
+                verification = verify_settings_recorded(our_table, requested_rated)
+                record["settings_verification"] = verification
+                print(f"table created: id={table_id} server_rated={verification['server_rated']} "
+                      f"requested_rated={verification['requested_rated']} "
+                      f"access={verification['access']} tc={verification['tc']}")
+                if not verification["matches"]:
+                    print(f"WARNING: requested rated={requested_rated} but the server "
+                          f"recorded rated={verification['server_rated']} on this table "
+                          f"-- our settings were NOT honoured as requested!")
+
+                # table.create does NOT auto-seat the creator -- a live probe of
+                # 9qum.com came back with seats=[None, None] and only a `creator` field
+                # set, so we still have to sit ourselves before anyone can play. Seat 0
+                # by convention (the brief does not specify which seat the inviter takes).
+                our_seat = 0
+                ws.send({"type": "table.sit", "tableId": table_id, "seat": our_seat})
+                time.sleep(0.3)
+
+                ws.send({"type": "table.invite", "tableId": table_id, "to": args.opponent})
+                print(f"invited {args.opponent!r} to table {table_id}; waiting up to "
+                      f"{args.max_wait:.0f}s for acceptance")
+
+                accepted = False
+                deadline = time.time() + args.max_wait
+                while not accepted and time.time() < deadline:
+                    evt = ws.next_event(timeout=max(0.5, deadline - time.time()))
+                    if evt is None:
+                        continue
+                    if evt.get("event") == "_bridge_eof":
+                        raise RuntimeError("websocket bridge exited unexpectedly while "
+                                           "waiting for invite acceptance")
+                    err = is_error_event(evt)
+                    if err:
+                        raise RuntimeError(f"server error after table.invite: {err}")
+                    if evt.get("event") == "message":
+                        t = find_table_by_id(evt.get("payload") or {}, table_id)
+                        if t is not None:
+                            our_table = t
+                            seats = t.get("seats") or []
+                            names = [s.get("name") if s else None for s in seats]
+                            if our_name in names:
+                                our_seat = names.index(our_name)
+                            if args.opponent in names:
+                                accepted = True
+
+                record["target_table"] = our_table
+                record["our_seat"] = our_seat
+                record["time_control"] = our_table.get("tc")
+
+                if not accepted:
+                    record["outcome"] = "opponent_declined_or_ignored"
+                    print(f"'{args.opponent}' did not accept the invite within "
+                          f"{args.max_wait:.0f}s.")
+                    return 0
+                seated = True  # opponent joined our table; cleanup should vacate it
+                print(f"invite accepted: table={table_id} seat={our_seat}")
+
+            # --- 2. play loop ---
             eng = Engine(Path(args.engine))
             eng.start()
             moves_log = []
@@ -583,7 +862,11 @@ def main() -> int:
                     # cleanly for the opponent too, instead of just vanishing.
                     ws.send({"type": "game.resign", "tableId": table_id})
                     time.sleep(0.3)
-                if seated and table_id is not None:
+                if (seated or own_table_created) and table_id is not None:
+                    # `seated` covers sit/challenge/invite once a real two-party table
+                    # exists; `own_table_created` additionally covers an invite table we
+                    # created but the opponent never accepted -- that table still needs
+                    # to be left/cancelled even though no game (and so no resign) exists.
                     ws.send({"type": "table.leave", "tableId": table_id})
                     time.sleep(0.3)
             except Exception as cleanup_exc:
