@@ -282,3 +282,47 @@ coincidence of two engines of similar strength against this opponent.
 
 The corollary is that `acc256`'s apparent collapse (0/9, then 6.2%) was never evidence against
 it: in the same window the production engine scores the same 12.5%.
+
+## The margin blend (NNU2 v4), and a correction to the diagnosis it was built on
+
+`acc256_score03_v4.bin` blends the two heads: `cp = (350·win_logit + 0.3·predicted_margin)`,
+with the margin de-normalised by 82 and scaled by `STONE_CP=21` (`eval.rs`'s
+`MATERIAL_WEIGHT`). NPS 0.83×, 22/22 Rust tests, torch↔Rust agreement 6.9e-05.
+
+| measurement | acc256 | v4 blend |
+|---|---|---|
+| `ab_match` vs production, equal time, 100 games | 77.0% (+210 Elo) | 81.0% (+252 Elo) |
+| monitors: midgame / close / clear | 88.2 / 88.8 / 93.0 | 87.9 / 89.8 / 94.2 |
+| monitors: policy match vs ≥2000 humans | 38.7% | **40.3%** (production 35.0%, 9qum 51.6%) |
+
+Re-measuring the *same* net (acc256, twice) gave 88.2/88.8/93.0 and 87.4/89.1/92.9 with policy
+38.7% and 38.2% — so the monitor's own noise is ~0.8 accuracy points and ~0.5 policy points.
+Against that, v4's only gains outside noise are clear-endgame (+1.2) and policy (+1.6), and its
+in-lineage +42 Elo over acc256 is inside the ±4% standard error of two 100-game matches. **The
+margin blend is not a measurable strength gain.**
+
+### Correction: the "margin blindness" reading was wrong
+
+That blend was motivated by replaying games and observing that the production engine carries a
++17 raw-kazan lead into its losses while `acc256` carried −4. I read that as the new eval having
+lost the incentive to grow a lead. Recording 100 internal games and profiling them properly
+shows the opposite:
+
+| engine | lead @25% | @50% | @75% | final | n |
+|---|---|---|---|---|---|
+| production (losing these games) | +12 | +14 | +16 | +18 | 80 |
+| `v4` (winning these games) | −12 | −14 | −16 | −18 | 80 |
+
+The new nets **win while carrying a negative raw-kazan lead**, because raw kazan is not the
+score: under the real rule each side's remaining board stones go to its own kazan at the end, so
+keeping stones on your own side is correct and hoarding them in the kazan is the error. That is
+the June sweep-rule finding, reproduced here from the behaviour of a trained net rather than from
+labels — and it is why both new nets beat production by ~200 Elo: they stopped making our own
+long-standing mistake.
+
+It also explains why that gain does not transfer: 9qum's net was trained on real games under the
+same rule and does not make the mistake either. Our advantage over production is the removal of
+our own defect, not an advantage over them.
+
+`tools/9qum/lead_profile.py` now prints this caveat above every table, because reading a raw-kazan
+lead as "who is ahead" produced a wrong diagnosis once already.
