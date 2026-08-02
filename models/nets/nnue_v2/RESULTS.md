@@ -326,3 +326,45 @@ our own defect, not an advantage over them.
 
 `tools/9qum/lead_profile.py` now prints this caveat above every table, because reading a raw-kazan
 lead as "who is ahead" produced a wrong diagnosis once already.
+
+## Phase A verdict: the evaluation got better, the engine did not
+
+Second paired window (2026-08-02, 13:00–16:45), same suite, same code, 24 counted games each,
+zero void:
+
+| engine | vs 9qum's net |
+|---|---|
+| production baseline | 5W-0D-19L = **20.8%** (Elo −232) |
+| `acc256_score03_v4` (margin blend) | 4W-0D-20L = **16.7%** (Elo −280) |
+
+v4 is nominally *worse* than production by 4.2 points, inside the ±8% standard error of two
+24-game runs. Together with the first paired window (acc256 12.5% vs baseline 12.5%) that is two
+independent paired measurements agreeing: **none of phase A's evaluation work produced external
+strength.**
+
+(Note on reading logs: `grep -h` across two log files silently drops the filenames and I nearly
+published these two numbers swapped. Each `match.py` log prints its own `our engine:` line —
+attribute scores from that line, never from file order.)
+
+What phase A did establish, per candidate:
+
+| lever | offline effect | external effect |
+|---|---|---|
+| sparse bucketed input (the encoding) | large: 81.5/79.3/84.7 → 88.2/88.8/93.0 | none |
+| accumulator width 1024 | harmful (71.3 midgame, 0.24× NPS) | −350..−510 Elo |
+| more epochs | plateau 0.4675 at epoch 33 | not measured (inside noise) |
+| score head as auxiliary loss only | 0.4677, a tie | — |
+| 8 phase buckets | 0.4715, worse | — |
+| margin blend (NNU2 v4) | clear endgame +1.2, policy +1.6 | none (16.7% vs 20.8%) |
+
+And the finding that explains the whole shape of it: our nets beat production by ~200-250 Elo
+because they stopped hoarding kazan — production carries +18 raw kazan into its losses and gives
+the game away to the endgame sweep. That is our own defect, documented since June. 9qum's net
+never had it, so removing ours buys nothing against them.
+
+**Conclusion.** Evaluation quality inside alpha-beta is not the axis that closes the gap. The
+remaining structural asymmetries are that their product is capped at 1280 sims while our
+inference is uncapped, and that their net will hand us visit counts, Q and priors for any
+position we construct — which is what phase B is for. Our policy is the weakest measured part
+(40.3% move agreement against their 51.6%), and policy is what decides which positions the game
+even reaches.
