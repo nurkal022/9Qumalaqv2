@@ -89,10 +89,14 @@ a gitignored directory beside the weights and verifies the engine loads them.
 ## 8. Validate positions before using them as evidence
 
 A scale-mismatch diagnosis was built on a hand-written position whose stones summed to 105
-instead of 162 — physically unreachable, so the net's opinion of it meant nothing. Any
-hand-written position must pass the invariant check in `research/data/features_v2.py`: the 18
-pits plus both kazans sum to exactly 162, no negative counts, and each tuzdyk is a legal pit on
-the correct side.
+instead of 162 — physically unreachable, so the net's opinion of it meant nothing. Any hand-written position used as *evidence about strength or evaluation quality* must pass
+`validate_position()` in `research/data/features_v2.py`: the 18 pits plus both kazans sum to
+exactly 162, no negative counts, and each tuzdyk is a legal pit on the correct side.
+
+The exception, deliberately: tests that check two implementations compute the same arithmetic
+(the torch↔Rust equality test) may use unreachable positions, because what they assert is
+numerical agreement, not the net's opinion. Legality matters when a number is being read as a
+statement about the game.
 
 ## 9. Reproducibility
 
