@@ -45,6 +45,18 @@ def test_clock_below_floor_never_exceeds_clock():
     assert move_budget_ms(FORTY, 1800, 12000, clock_left_ms=50) == 50
 
 
+def test_nonpositive_clock_still_returns_a_positive_budget():
+    # A clock that is already exhausted (0) or overrun (negative -- spent_ms can exceed
+    # the nominal clock once it tracks real elapsed time) must still yield something the
+    # engine subprocess can parse as a positive `go time`, never zero or negative.
+    zero = move_budget_ms(FORTY, 1800, 12000, clock_left_ms=0)
+    negative = move_budget_ms(FORTY, 1800, 12000, clock_left_ms=-100)
+    assert zero > 0
+    assert negative > 0
+    # And where the clock IS positive, the budget still never exceeds it.
+    assert move_budget_ms(FORTY, 1800, 12000, clock_left_ms=1) <= 1
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

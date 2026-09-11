@@ -43,13 +43,15 @@ def move_budget_ms(pos: str, base_ms: int, endgame_ms: int, *, threshold: int = 
     keeps `reserve_ms` on the clock, falling back to half the clock once even that is
     gone -- and the result is always clamped to `clock_left_ms` itself, so the 100 ms
     floor below can never push the budget past what is actually left on the clock. With
-    no clock given the floor is a plain 100 ms so the engine still returns a move."""
+    no clock given the floor is a plain 100 ms so the engine still returns a move. The
+    result is always at least 1 ms -- even with a zero or already-negative clock -- so
+    the engine subprocess is always handed a positive value it can parse."""
     white, black, _, _, _ = _parse_pos(pos)
     budget = endgame_ms if sum(white) + sum(black) <= threshold else base_ms
     if clock_left_ms is not None:
         cap = max(clock_left_ms - reserve_ms, min(base_ms, clock_left_ms // 2))
         budget = min(budget, cap, clock_left_ms)
-        return max(budget, min(100, clock_left_ms))
+        return max(budget, min(100, clock_left_ms), 1)
     return max(budget, 100)
 
 
