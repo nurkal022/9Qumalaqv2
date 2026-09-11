@@ -561,6 +561,7 @@ class Bridge:
         self.game.last_sent_pos = None
         self.opponent_nick = None
         self.thinking = False
+        self.spent_ms = 0  # fresh clock accounting for the next game
         self._table_had_opponent = False  # reset so new table won't false-trigger
         if self.scout_mode:
             # next op-70/73 lobby update will trigger _try_join_from_lobby()
@@ -571,12 +572,12 @@ class Bridge:
             self.client.new_table()
 
     def _compute_and_send(self, pos, mask):
+        start = time.monotonic()
         try:
             clock_left = None if self.time_min == 0 else self.time_min * 60_000 - self.spent_ms
             budget = move_budget_ms(pos, self.move_time_ms, self.endgame_move_time_ms,
                                     clock_left_ms=clock_left)
             pick = self.engine.bestmove(pos, budget)
-            self.spent_ms += budget
             if isinstance(pick, tuple):
                 # With the real terminal rule (core fix 2026-09-12) the engine and the
                 # server must agree. If they ever disagree again this is a RULES BUG, not
@@ -600,6 +601,11 @@ class Bridge:
             self.client.move(self.table_k, hole, think_ds=max(1, budget // 100))
             print(f"[bridge] SENT move hole {hole} (board advances on server echo)", flush=True)
         finally:
+            # Actual wall time spent, not the requested budget -- covers the engine
+            # round-trip and the client.move() network call, and is recorded on every
+            # exit path (including the rule-mismatch return and any exception) so the
+            # clock tracker never undercounts what the game clock actually charged us.
+            self.spent_ms += int((time.monotonic() - start) * 1000)
             self.thinking = False
 
     def _abandon_table(self):
@@ -614,6 +620,7 @@ class Bridge:
         self.entered = False
         self.sat = False
         self.side_locked = False
+        self.spent_ms = 0  # fresh clock accounting for the next game
         self._try_join_from_lobby()
 
     def _join_logic(self, op, i, s):

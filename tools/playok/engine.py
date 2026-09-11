@@ -40,13 +40,16 @@ def move_budget_ms(pos: str, base_ms: int, endgame_ms: int, *, threshold: int = 
                    clock_left_ms: int | None = None, reserve_ms: int = 120_000) -> int:
     """Thinking budget for `pos`: `endgame_ms` once <= `threshold` stones remain on the
     board, else `base_ms`. When the remaining clock is known, never spend more than what
-    keeps `reserve_ms` on the clock, and when even that is gone fall back to half the
-    clock (never below 100 ms so the engine still returns a move)."""
+    keeps `reserve_ms` on the clock, falling back to half the clock once even that is
+    gone -- and the result is always clamped to `clock_left_ms` itself, so the 100 ms
+    floor below can never push the budget past what is actually left on the clock. With
+    no clock given the floor is a plain 100 ms so the engine still returns a move."""
     white, black, _, _, _ = _parse_pos(pos)
     budget = endgame_ms if sum(white) + sum(black) <= threshold else base_ms
     if clock_left_ms is not None:
         cap = max(clock_left_ms - reserve_ms, min(base_ms, clock_left_ms // 2))
-        budget = min(budget, cap)
+        budget = min(budget, cap, clock_left_ms)
+        return max(budget, min(100, clock_left_ms))
     return max(budget, 100)
 
 

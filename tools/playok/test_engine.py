@@ -39,6 +39,12 @@ def test_clock_nearly_out_never_below_half_clock_or_100ms():
     assert move_budget_ms(FORTY, 1800, 12000, clock_left_ms=100) == 100
 
 
+def test_clock_below_floor_never_exceeds_clock():
+    # 50 ms left is below the usual 100 ms floor -- the floor must not push the
+    # budget past what is actually left on the clock.
+    assert move_budget_ms(FORTY, 1800, 12000, clock_left_ms=50) == 50
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
