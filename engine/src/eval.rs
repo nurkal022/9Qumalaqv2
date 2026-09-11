@@ -312,9 +312,130 @@ fn predict_landing(pit: usize, stones: u8, side: usize) -> Option<(usize, usize)
     Some((landing_side, pos))
 }
 
+// ---------------------------------------------------------------------------
+// Tempo endgame (2026-09-12). Measured on 244 PlayOK games: losses end with ~30 stones
+// on the board after 40-90 plies of lone-stone play, the bot's row empty and the
+// opponent's row holding a hoard that sweeps into its kazan. Two quantities describe
+// that phase: how many waiting moves a row has before a stone must cross, and how many
+// stones sit in pits that cannot move without crossing (a hoard).
+// ---------------------------------------------------------------------------
+
+/// Waiting moves a row can make before any stone crosses to the opponent, ignoring the
+/// opponent's replies. A pit at index `i` with `k` stones moves without crossing iff
+/// `i + k - 1 <= 8`; that spreads it into lone stones at i..i+k-1, each with `8 - j`
+/// further moves. Locked pits (would cross) contribute nothing. A lone stone that would
+/// land in the opponent's tuzdyk is treated as staying (rare; ignored).
+#[inline]
+pub fn tempo_reserve(row: &[u8; NUM_PITS]) -> i32 {
+    let mut t = 0i32;
+    for i in 0..NUM_PITS {
+        let k = row[i] as usize;
+        if k == 0 || i + k - 1 > 8 {
+            continue;
+        }
+        let (ki, ii) = (k as i32, i as i32);
+        t += ki * (8 - ii) - ki * (ki - 1) / 2;
+    }
+    t
+}
+
+/// Stones in pits that cannot move without crossing over. While their owner still has
+/// tempo they never have to move, so under the sweep rule they are that side's material.
+#[inline]
+pub fn locked_stones(row: &[u8; NUM_PITS]) -> i32 {
+    let mut s = 0i32;
+    for i in 0..NUM_PITS {
+        let k = row[i] as usize;
+        if k > 0 && i + k - 1 > 8 {
+            s += k as i32;
+        }
+    }
+    s
+}
+
+/// Weight of one locked stone (about half a kazan stone, MATERIAL_WEIGHT = 21): it is
+/// sweep material only while its owner keeps tempo. Tuned in Task 8/9 by external gate.
+pub const TEMPO_LOCK_WEIGHT: i32 = 12;
+/// Weight of one waiting move of tempo advantage.
+pub const TEMPO_WEIGHT: i32 = 4;
+/// Tempo advantage beyond this many moves is not worth more.
+pub const TEMPO_DIFF_CLAMP: i32 = 30;
+/// Board stones at or below which the tempo correction applies.
+pub const TEMPO_PHASE_STONES: u16 = 60;
+
+/// Side-to-move correction for the tempo endgame. Zero above TEMPO_PHASE_STONES.
+#[inline]
+pub fn endgame_tempo_correction(board: &Board) -> i32 {
+    if board.total_board_stones() > TEMPO_PHASE_STONES {
+        return 0;
+    }
+    let me = board.side_to_move.index();
+    let opp = 1 - me;
+    let lock = locked_stones(&board.pits[me]) - locked_stones(&board.pits[opp]);
+    let tempo = (tempo_reserve(&board.pits[me]) - tempo_reserve(&board.pits[opp]))
+        .clamp(-TEMPO_DIFF_CLAMP, TEMPO_DIFF_CLAMP);
+    lock * TEMPO_LOCK_WEIGHT + tempo * TEMPO_WEIGHT
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::Side;
+
+    #[test]
+    fn tempo_lone_stone_counts_steps_to_pit9() {
+        let mut row = [0u8; NUM_PITS];
+        row[0] = 1;
+        assert_eq!(tempo_reserve(&row), 8);
+        let mut row = [0u8; NUM_PITS];
+        row[8] = 1;
+        assert_eq!(tempo_reserve(&row), 0, "a lone stone in pit 9 must cross next move");
+    }
+
+    #[test]
+    fn tempo_locked_pile_gives_no_tempo_but_is_locked_material() {
+        let mut row = [0u8; NUM_PITS];
+        row[3] = 20; // 3 + 19 > 8: cannot move without crossing
+        assert_eq!(tempo_reserve(&row), 0);
+        assert_eq!(locked_stones(&row), 20);
+    }
+
+    #[test]
+    fn tempo_small_pile_spreads_into_lone_stones() {
+        let mut row = [0u8; NUM_PITS];
+        row[6] = 3; // 6 + 2 = 8: movable; leaves lone stones at 6,7,8 -> 2 + 1 + 0
+        assert_eq!(tempo_reserve(&row), 3);
+        assert_eq!(locked_stones(&row), 0);
+    }
+
+    #[test]
+    fn tempo_correction_zero_in_midgame() {
+        assert_eq!(endgame_tempo_correction(&Board::new()), 0);
+    }
+
+    #[test]
+    fn tempo_correction_penalises_side_out_of_tempo_facing_a_hoard() {
+        // The measured loss shape: side to move leads in kazan, has only lone stones,
+        // opponent holds locked hoards and more tempo.
+        let mut b = Board::new();
+        b.kazan = [55, 40];
+        b.pits[0] = [1, 1, 0, 0, 0, 1, 1, 0, 1]; // tempo 8+7+3+2+0 = 20, locked 0
+        b.pits[1] = [0, 2, 5, 0, 8, 3, 4, 0, 8]; // tempo 13+20+6 = 39, locked 8+4+8 = 20
+        let c = endgame_tempo_correction(&b); // White to move
+        assert!(c < -100, "got {}", c);
+    }
+
+    #[test]
+    fn tempo_correction_is_antisymmetric_in_side_to_move() {
+        let mut b = Board::new();
+        b.kazan = [55, 40];
+        b.pits[0] = [1, 1, 0, 0, 0, 1, 1, 0, 1];
+        b.pits[1] = [0, 2, 5, 0, 8, 3, 4, 0, 8];
+        let white = endgame_tempo_correction(&b);
+        b.side_to_move = Side::Black;
+        let black = endgame_tempo_correction(&b);
+        assert_eq!(white, -black);
+    }
 
     #[test]
     fn test_initial_eval_near_zero() {
