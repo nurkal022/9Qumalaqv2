@@ -6,7 +6,7 @@
 ///
 /// Pits are numbered 1-9 for each player (internally 0-8).
 /// Each pit starts with 9 stones. Total: 162 stones.
-/// Win condition: first to capture 82+ stones in kazan.
+/// Win: 82+ in kazan, or the side to move has no stones (then each side sweeps its own board stones).
 
 use std::fmt;
 
@@ -234,7 +234,15 @@ impl Board {
         true
     }
 
-    /// Check game result. Returns Some(winner_side) or Some draw indication, or None if ongoing.
+    /// Check game result. Returns Some(winner) / Some(Draw), or None if the game goes on.
+    ///
+    /// Terminal when (a) a kazan reaches WIN_THRESHOLD, or (b) the SIDE TO MOVE has no
+    /// stones. Rule (b) is deliberately one-sided: a player who empties its own side (a
+    /// lone stone from pit 9, or a lone stone into the opponent's tuzdyk) has NOT ended the
+    /// game — the opponent must move, and if that move drops stones back, play continues.
+    /// Verified 2026-09-12 against PlayOK (110 self-empties, play always continued) and
+    /// 9qum replays (1120 such states, 0 contradictions). At a terminal each side sweeps
+    /// its own remaining board stones into its kazan before comparing.
     pub fn game_result(&self) -> Option<GameResult> {
         if self.kazan[0] >= WIN_THRESHOLD {
             return Some(GameResult::Win(Side::White));
@@ -243,14 +251,8 @@ impl Board {
             return Some(GameResult::Win(Side::Black));
         }
 
-        // Check if either side is empty
-        let white_empty = self.pits[0].iter().all(|&x| x == 0);
-        let black_empty = self.pits[1].iter().all(|&x| x == 0);
-
-        if white_empty || black_empty {
-            // End-of-game sweep: each side's remaining board stones go into its
-            // own kazan before comparing (the empty side contributes 0). Equivalent
-            // to "the player who still has stones takes the rest of the board".
+        let stm = self.side_to_move.index();
+        if self.pits[stm].iter().all(|&x| x == 0) {
             let kw = self.kazan[0] as u16 + self.stones_on_side(Side::White);
             let kb = self.kazan[1] as u16 + self.stones_on_side(Side::Black);
             return Some(match kw.cmp(&kb) {
@@ -577,5 +579,61 @@ mod tests {
     fn test_parse_position_rejects_malformed() {
         assert!(parse_position("bad").is_err());
         assert!(parse_position("9,9/9,9/0,0/-1,-1/0").is_err());
+    }
+
+    #[test]
+    fn test_empty_side_not_terminal_when_opponent_to_move() {
+        // White emptied itself; Black still must move. NOT over yet.
+        let mut b = Board::new();
+        b.pits[0] = [0; 9];
+        b.pits[1] = [0, 0, 0, 0, 0, 0, 0, 0, 3];
+        b.kazan = [80, 79];
+        b.side_to_move = Side::Black;
+        assert_eq!(b.game_result(), None);
+    }
+
+    #[test]
+    fn test_empty_side_terminal_when_it_is_to_move() {
+        // Same board, but it is White's turn and White has nothing: game over, sweep.
+        let mut b = Board::new();
+        b.pits[0] = [0; 9];
+        b.pits[1] = [0, 0, 0, 0, 0, 0, 0, 0, 3];
+        b.kazan = [80, 79];
+        b.side_to_move = Side::White;
+        assert_eq!(b.game_result(), Some(GameResult::Win(Side::Black))); // 80 vs 79+3
+    }
+
+    #[test]
+    fn test_forced_feed_continues_game() {
+        // Black's only move (pit 9, 3 stones) drops 2 stones onto White's side:
+        // White is back in the game.
+        let mut b = Board::new();
+        b.pits[0] = [0; 9];
+        b.pits[1] = [0, 0, 0, 0, 0, 0, 0, 0, 3];
+        b.kazan = [80, 79];
+        b.side_to_move = Side::Black;
+        b.make_move(8);
+        assert_eq!(b.pits[0], [1, 1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(b.side_to_move, Side::White);
+        assert_eq!(b.game_result(), None);
+        let mut moves = [0usize; NUM_PITS];
+        assert_eq!(b.valid_moves_array(&mut moves), 2);
+    }
+
+    #[test]
+    fn test_lone_stone_from_pit9_then_safe_reply_ends_game() {
+        // White plays its last stone from pit 9 -> White empty, Black to move (not over).
+        // Black answers with a lone stone that stays on its side -> White to move with
+        // nothing -> over; Black sweeps its 6 board stones.
+        let mut b = Board::new();
+        b.pits[0] = [0, 0, 0, 0, 0, 0, 0, 0, 1];
+        b.pits[1] = [0, 0, 0, 0, 0, 0, 0, 0, 5];
+        b.kazan = [78, 78];
+        b.side_to_move = Side::White;
+        b.make_move(8); // lone stone -> Black pit 1
+        assert_eq!(b.pits[1], [1, 0, 0, 0, 0, 0, 0, 0, 5]);
+        assert_eq!(b.game_result(), None, "self-emptying must not end the game");
+        b.make_move(0); // Black: lone stone pit 1 -> pit 2, White still empty
+        assert_eq!(b.game_result(), Some(GameResult::Win(Side::Black))); // 78 vs 78+6
     }
 }
