@@ -28,7 +28,7 @@ import requests
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "tools" / "playok"))
-from engine import Engine  # noqa: E402  (repo-local helper)
+from engine import Engine, move_budget_ms  # noqa: E402  (repo-local helper)
 sys.path.insert(0, str(REPO / "research" / "data"))
 import features_v2 as fv  # noqa: E402  (repo-local helper: shared position validator)
 sys.path.insert(0, str(REPO / "tools"))
@@ -189,7 +189,7 @@ def _position_of(st):
 
 
 def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, idx, mode="analysis",
-              opening=None, max_recoveries=MAX_RECOVERIES_PER_GAME, engine_meta=None):
+              opening=None, max_recoveries=MAX_RECOVERIES_PER_GAME, engine_meta=None, endgame_ms=None):
     """One game. In `analysis` mode the board is an analysis board: we may post moves for
     both sides, so their net plays argmax(visits) — full strength. In `ai-game` mode the
     server owns the AI side and only accepts its own (mix/drop-randomised) choice.
@@ -242,7 +242,9 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
 
         while not st.get("finished") and plies < 400:
             if st["to_move"] == our_seat:
-                mv = eng.bestmove(pos_from_state(st), time_ms=move_ms)
+                pos = pos_from_state(st)
+                budget = move_budget_ms(pos, move_ms, move_ms if endgame_ms is None else endgame_ms)
+                mv = eng.bestmove(pos, time_ms=budget)
                 if isinstance(mv, tuple):       # engine says terminal
                     break
             else:
@@ -264,6 +266,7 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
     if void_reason is not None:
         rec = {"game_id": gid, "mode": mode, "opening": (opening or {}).get("line", ""),
                "our_seat": our_seat, "level": level, "pick": pick, "move_ms": move_ms,
+               "endgame_ms": endgame_ms,
                "result": "VOID", "void_reason": void_reason, "recoveries": recoveries,
                "plies": plies, "kazan": (st or {}).get("kazan"), "tuzdyk": (st or {}).get("tuzdyk"),
                "engine_path": engine_meta.get("engine_path"),
@@ -283,7 +286,7 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
     result = "D" if winner == -1 else ("W" if winner == our_seat else "L")
     rec = {"game_id": gid, "mode": mode, "opening": (opening or {}).get("line", ""), "our_seat": our_seat, "level": level, "level_sims": lvl.get("sims"),
            "level_mix": lvl.get("mix"), "level_drop": lvl.get("drop"), "pick": pick,
-           "move_ms": move_ms, "result": result, "winner": winner, "plies": plies,
+           "move_ms": move_ms, "endgame_ms": endgame_ms, "result": result, "winner": winner, "plies": plies,
            "kazan": st.get("kazan"), "tuzdyk": st.get("tuzdyk"), "record": st.get("record"),
            "tfen": st.get("tfen"), "net_version": st.get("net_version"), "recoveries": recoveries,
            "engine_path": engine_meta.get("engine_path"),
@@ -334,6 +337,8 @@ def main():
     ap.add_argument("--pick", default="argmax", choices=["argmax", "server"],
                     help="argmax = their net at full strength; server = their handicapped choice")
     ap.add_argument("--move-ms", type=int, default=1000, help="thinking time for our engine")
+    ap.add_argument("--endgame-move-ms", type=int, default=None,
+                    help="thinking time at <=40 board stones (default: same as --move-ms)")
     ap.add_argument("--engine", default=str(REPO / "models" / "engine" / "baseline"))
     ap.add_argument("--parallel", type=int, default=1)
     ap.add_argument("--rps", type=float, default=0.7, help="requests/s to their API (they 429 above ~1/2s)")
@@ -382,7 +387,7 @@ def main():
         try:
             op = suite[(idx // 2) % len(suite)] if suite else None
             return play_game(api, e, idx % 2, a.level, a.move_ms, a.pick, a.their_sims, log_path, idx,
-                             a.mode, op, engine_meta=engine_meta)
+                             a.mode, op, engine_meta=engine_meta, endgame_ms=a.endgame_move_ms)
         finally:
             e.stop()
 

@@ -30,6 +30,25 @@ DEFAULT_ENGINE = Path(os.environ.get("TK_ENGINE", str(REPO_ROOT / "models" / "en
 START_POSITION = "9,9,9,9,9,9,9,9,9/9,9,9,9,9,9,9,9,9/0,0/-1,-1/0"
 NUM_PITS = 9
 
+# Board-stone count at or below which a move gets the endgame budget. Measured on 244
+# PlayOK games: losses end with a median of 30 stones on the board after 40-90 plies of
+# lone-stone tempo play; branching there is 2-4, so extra time buys real depth.
+ENDGAME_STONES = 40
+
+
+def move_budget_ms(pos: str, base_ms: int, endgame_ms: int, *, threshold: int = ENDGAME_STONES,
+                   clock_left_ms: int | None = None, reserve_ms: int = 120_000) -> int:
+    """Thinking budget for `pos`: `endgame_ms` once <= `threshold` stones remain on the
+    board, else `base_ms`. When the remaining clock is known, never spend more than what
+    keeps `reserve_ms` on the clock, and when even that is gone fall back to half the
+    clock (never below 100 ms so the engine still returns a move)."""
+    white, black, _, _, _ = _parse_pos(pos)
+    budget = endgame_ms if sum(white) + sum(black) <= threshold else base_ms
+    if clock_left_ms is not None:
+        cap = max(clock_left_ms - reserve_ms, min(base_ms, clock_left_ms // 2))
+        budget = min(budget, cap)
+    return max(budget, 100)
+
 
 class Engine:
     """One engine subprocess in serve mode (synchronous)."""

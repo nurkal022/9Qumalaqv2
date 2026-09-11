@@ -27,7 +27,7 @@ import os
 import threading
 import time
 
-from engine import Engine, START_POSITION
+from engine import Engine, START_POSITION, move_budget_ms
 from playok import PlayokClient
 
 GAMES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "games")
@@ -68,6 +68,7 @@ class GameState:
 
 class Bridge:
     def __init__(self, user, pw, *, invite=None, dry_run=True, move_time_ms=1800,
+                 endgame_move_time_ms=12000,
                  my_side=0, orient_flip=False, join_k=None, room=None,
                  accept=False, accept_from=None,
                  private=True, rated=False, time_min=30, increment_s=0,
@@ -84,6 +85,9 @@ class Bridge:
         self.invite_nick = invite
         self.dry_run = dry_run
         self.move_time_ms = move_time_ms
+        self.endgame_move_time_ms = endgame_move_time_ms
+        self.spent_ms = 0            # our thinking time used in the current game
+        self.rule_mismatches = 0     # engine said terminal but the server wanted a move
         self.join_k = join_k
         self.table_k = join_k
         self.game = GameState(my_side=my_side, orient_flip=orient_flip)
@@ -287,6 +291,7 @@ class Bridge:
                 if result != 8:
                     self.game.active = False
                     self.games_played += 1
+                    self.spent_ms = 0
                     # The PlayOK result field (i[4]) sign is NOT a reliable
                     # white/black-wins flag — empirically i[4]==1 occurs for BOTH
                     # white and black wins. The trustworthy signal is our own
@@ -567,26 +572,32 @@ class Bridge:
 
     def _compute_and_send(self, pos, mask):
         try:
-            pick = self.engine.bestmove(pos, self.move_time_ms)
+            clock_left = None if self.time_min == 0 else self.time_min * 60_000 - self.spent_ms
+            budget = move_budget_ms(pos, self.move_time_ms, self.endgame_move_time_ms,
+                                    clock_left_ms=clock_left)
+            pick = self.engine.bestmove(pos, budget)
+            self.spent_ms += budget
             if isinstance(pick, tuple):
-                print(f"[engine] terminal: {pick[1]}", flush=True)
-                # Engine sees position as done, but PlayOK may still need sweep moves.
-                # If the server gave us a legal mask, play the lowest legal hole so the
-                # sweep sequence completes and we don't lose on time.
+                # With the real terminal rule (core fix 2026-09-12) the engine and the
+                # server must agree. If they ever disagree again this is a RULES BUG, not
+                # a sweep quirk: play the lowest legal hole so we don't lose on time, and
+                # count it so the mismatch is visible in the log.
+                self.rule_mismatches += 1
+                print(f"[engine] *** RULE MISMATCH #{self.rule_mismatches}: engine says terminal "
+                      f"({pick[1]}) but server expects a move; pos={pos}", flush=True)
                 if mask is not None and mask != 0:
                     hole = (mask & -mask).bit_length() - 1  # lowest set bit
-                    print(f"[engine] sweep fallback -> hole {hole} (mask={mask:#011b})", flush=True)
                     if not self.dry_run:
                         self.client.move(self.table_k, hole, think_ds=1)
-                        print(f"[bridge] SENT sweep hole {hole}", flush=True)
+                        print(f"[bridge] SENT fallback hole {hole}", flush=True)
                 return
             hole = self.game.engine_to_playok(pick)
             legal_ok = (mask is None) or bool(mask & (1 << hole))
-            print(f"[engine] pos={pos} -> pit {pick} -> hole {hole} (mask ok={legal_ok})", flush=True)
+            print(f"[engine] pos={pos} budget={budget}ms -> pit {pick} -> hole {hole} (mask ok={legal_ok})", flush=True)
             if self.dry_run:
                 print(f"[DRY-RUN] would send [92,{self.table_k},1,{hole},..]", flush=True)
                 return
-            self.client.move(self.table_k, hole, think_ds=max(1, self.move_time_ms // 100))
+            self.client.move(self.table_k, hole, think_ds=max(1, budget // 100))
             print(f"[bridge] SENT move hole {hole} (board advances on server echo)", flush=True)
         finally:
             self.thinking = False
@@ -692,6 +703,8 @@ if __name__ == "__main__":
     ap.add_argument("--invite")
     ap.add_argument("--seconds", type=int, default=86400)
     ap.add_argument("--move-time-ms", type=int, default=1800)
+    ap.add_argument("--endgame-move-time-ms", type=int, default=12000,
+                    help="thinking time once <=40 stones remain on the board (default: 12000)")
     ap.add_argument("--my-side", type=int, default=0, help="engine side we control (seat 0 -> 0)")
     ap.add_argument("--orient-flip", action="store_true")
     ap.add_argument("--join", type=int, help="join an EXISTING table by number (op 72 enter + sit)")
@@ -726,7 +739,8 @@ if __name__ == "__main__":
         raise SystemExit("set --user/--pw or PLAYOK_USER/PLAYOK_PW")
 
     b = Bridge(args.user, args.pw, invite=args.invite, dry_run=not args.live,
-               move_time_ms=args.move_time_ms, my_side=args.my_side,
+               move_time_ms=args.move_time_ms, endgame_move_time_ms=args.endgame_move_time_ms,
+               my_side=args.my_side,
                orient_flip=args.orient_flip, join_k=args.join, room=args.room,
                accept=args.accept or bool(args.accept_from), accept_from=args.accept_from,
                private=not args.public, rated=args.rated,
