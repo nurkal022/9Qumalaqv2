@@ -90,6 +90,49 @@ pub struct Searcher {
     excluded_move: i8,
 }
 
+/// Handcrafted endgame corrections added on top of the NNUE output (side-to-move POV):
+/// mobility, starvation pressure, finishing bonus, kazan proximity. Zero above 60 board
+/// stones. Moved out of `Searcher::eval` unchanged (2026-09-12) so the wiring is testable.
+pub(crate) fn nnue_endgame_terms(board: &Board) -> i32 {
+    let me = board.side_to_move.index();
+    let opp = 1 - me;
+    let my_stones: u16 = board.pits[me].iter().map(|&x| x as u16).sum();
+    let opp_stones: u16 = board.pits[opp].iter().map(|&x| x as u16).sum();
+    let total = my_stones + opp_stones;
+    if total > 60 {
+        return 0;
+    }
+    let my_active = board.pits[me].iter().filter(|&&x| x > 0).count() as i32;
+    let opp_active = board.pits[opp].iter().filter(|&&x| x > 0).count() as i32;
+
+    // Scale corrections smoothly: total=60→1, total=30→2, total=15→3, total=5→4
+    let scale = ((65 - total as i32).max(1)) / 15;
+    let scale = scale.clamp(1, 4);
+
+    // Mobility: critical endgame factor (PlayOK: mobility weight = 124 in HCE)
+    let mobility_bonus = (my_active - opp_active) * 3 * scale;
+
+    // Starvation: quadratic pressure when opponent running low
+    let starvation = if opp_stones <= 20 {
+        let pressure = 21 - opp_stones as i32;
+        (pressure * pressure * scale) / 8
+    } else { 0 };
+
+    // Finishing: huge bonus to close out won games
+    let my_kazan = board.kazan[me] as i32;
+    let opp_kazan = board.kazan[opp] as i32;
+    let finish_bonus = if my_kazan > opp_kazan + 5 && opp_stones <= 8 {
+        (9 - opp_stones as i32) * 8 * scale
+    } else { 0 };
+
+    // Kazan proximity: accelerate when close to 82
+    let kazan_bonus = if my_kazan >= 65 {
+        (my_kazan - 65) * 2 * scale
+    } else { 0 };
+
+    mobility_bonus + starvation + finish_bonus + kazan_bonus
+}
+
 impl Searcher {
     pub fn new(tt_size_mb: usize) -> Self {
         Searcher {
@@ -184,35 +227,7 @@ impl Searcher {
             let total = my_stones + opp_stones;
 
             if total <= 60 {
-                let my_active = board.pits[me].iter().filter(|&&x| x > 0).count() as i32;
-                let opp_active = board.pits[opp].iter().filter(|&&x| x > 0).count() as i32;
-
-                // Scale corrections smoothly: total=60→1, total=30→2, total=15→3, total=5→4
-                let scale = ((65 - total as i32).max(1)) / 15;
-                let scale = scale.clamp(1, 4);
-
-                // Mobility: critical endgame factor (PlayOK: mobility weight = 124 in HCE)
-                let mobility_bonus = (my_active - opp_active) * 3 * scale;
-
-                // Starvation: quadratic pressure when opponent running low
-                let starvation = if opp_stones <= 20 {
-                    let pressure = 21 - opp_stones as i32;
-                    (pressure * pressure * scale) / 8
-                } else { 0 };
-
-                // Finishing: huge bonus to close out won games
-                let my_kazan = board.kazan[me] as i32;
-                let opp_kazan = board.kazan[opp] as i32;
-                let finish_bonus = if my_kazan > opp_kazan + 5 && opp_stones <= 8 {
-                    (9 - opp_stones as i32) * 8 * scale
-                } else { 0 };
-
-                // Kazan proximity: accelerate when close to 82
-                let kazan_bonus = if my_kazan >= 65 {
-                    (my_kazan - 65) * 2 * scale
-                } else { 0 };
-
-                base + mobility_bonus + starvation + finish_bonus + kazan_bonus
+                base + nnue_endgame_terms(board) + crate::eval::endgame_tempo_correction(board)
             } else {
                 base
             }
@@ -1237,5 +1252,48 @@ impl Searcher {
         self.countermove = [[-1; NUM_PITS]; 2];
         self.cont_history = [[[0; NUM_PITS]; NUM_PITS]; 2];
         self.game_history.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::board::Side;
+
+    fn searcher_with_production_net() -> Searcher {
+        let mut s = Searcher::new(1);
+        // cargo test runs with cwd = engine/, so the production weights are one level up.
+        let net = crate::nnue::NnueNetwork::load("../models/engine/nnue_weights.bin")
+            .expect("production weights present");
+        s.set_nnue(net);
+        s
+    }
+
+    fn hoard_position() -> Board {
+        let mut b = Board::new();
+        b.kazan = [55, 40];
+        b.pits[0] = [1, 1, 0, 0, 0, 1, 1, 0, 1];
+        b.pits[1] = [0, 2, 5, 0, 8, 3, 4, 0, 8];
+        b.side_to_move = Side::White;
+        b
+    }
+
+    #[test]
+    fn live_eval_is_base_plus_endgame_terms_plus_tempo() {
+        let s = searcher_with_production_net();
+        let b = hoard_position();
+        let base = s.nnue.as_ref().unwrap().evaluate(&b) / 64;
+        let expected = base + nnue_endgame_terms(&b) + crate::eval::endgame_tempo_correction(&b);
+        assert_eq!(s.eval(&b), expected);
+        assert!(crate::eval::endgame_tempo_correction(&b) < -100, "precondition: the term is active here");
+    }
+
+    #[test]
+    fn live_eval_has_no_endgame_terms_in_the_opening() {
+        let s = searcher_with_production_net();
+        let b = Board::new(); // 162 stones on the board
+        let base = s.nnue.as_ref().unwrap().evaluate(&b) / 64;
+        assert_eq!(s.eval(&b), base);
+        assert_eq!(nnue_endgame_terms(&b), 0);
     }
 }
