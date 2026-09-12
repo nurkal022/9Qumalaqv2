@@ -354,7 +354,7 @@ pub fn locked_stones(row: &[u8; NUM_PITS]) -> i32 {
 }
 
 /// Weight of one locked stone (about half a kazan stone, MATERIAL_WEIGHT = 21): it is
-/// sweep material only while its owner keeps tempo. Tuned in Task 8/9 by external gate.
+/// sweep material only while its owner keeps tempo. Not yet tuned by an external gate.
 pub const TEMPO_LOCK_WEIGHT: i32 = 12;
 /// Weight of one waiting move of tempo advantage.
 pub const TEMPO_WEIGHT: i32 = 4;
@@ -363,7 +363,23 @@ pub const TEMPO_DIFF_CLAMP: i32 = 30;
 /// Board stones at or below which the tempo correction applies.
 pub const TEMPO_PHASE_STONES: u16 = 60;
 
+/// A side's locked stones count as sweep material only while that side still has
+/// tempo (see `locked_stones`'s doc comment): a side with zero tempo reserve must
+/// break its hoard on its very next move, so the hoard is not protected material and
+/// earns no credit. A side with any tempo at all still gets full credit for its whole
+/// hoard, unscaled by how much tempo it has.
+#[inline]
+fn credited_locked_stones(row: &[u8; NUM_PITS]) -> i32 {
+    if tempo_reserve(row) > 0 {
+        locked_stones(row)
+    } else {
+        0
+    }
+}
+
 /// Side-to-move correction for the tempo endgame. Zero above TEMPO_PHASE_STONES.
+/// Two independent terms: the locked-stone difference (gated on tempo, see
+/// `credited_locked_stones`) and the clamped tempo-reserve difference.
 #[inline]
 pub fn endgame_tempo_correction(board: &Board) -> i32 {
     if board.total_board_stones() > TEMPO_PHASE_STONES {
@@ -371,7 +387,7 @@ pub fn endgame_tempo_correction(board: &Board) -> i32 {
     }
     let me = board.side_to_move.index();
     let opp = 1 - me;
-    let lock = locked_stones(&board.pits[me]) - locked_stones(&board.pits[opp]);
+    let lock = credited_locked_stones(&board.pits[me]) - credited_locked_stones(&board.pits[opp]);
     let tempo = (tempo_reserve(&board.pits[me]) - tempo_reserve(&board.pits[opp]))
         .clamp(-TEMPO_DIFF_CLAMP, TEMPO_DIFF_CLAMP);
     lock * TEMPO_LOCK_WEIGHT + tempo * TEMPO_WEIGHT
@@ -415,10 +431,12 @@ mod tests {
 
     #[test]
     fn tempo_correction_penalises_side_out_of_tempo_facing_a_hoard() {
-        // The measured loss shape: side to move leads in kazan, has only lone stones,
-        // opponent holds locked hoards and more tempo.
+        // Constructed position, not a claim about any real game (see
+        // docs/MEASUREMENT_PROTOCOL.md rule 8): side to move leads in kazan, has only
+        // lone stones, opponent holds locked hoards and more tempo. Checks that the
+        // correction still penalises being out of tempo even while ahead on kazan.
         let mut b = Board::new();
-        b.kazan = [55, 40];
+        b.kazan = [71, 56]; // 71+56 = 127; +35 board stones = 162
         b.pits[0] = [1, 1, 0, 0, 0, 1, 1, 0, 1]; // tempo 8+7+3+2+0 = 20, locked 0
         b.pits[1] = [0, 2, 5, 0, 8, 3, 4, 0, 8]; // tempo 13+20+6 = 39, locked 8+4+8 = 20
         let c = endgame_tempo_correction(&b); // White to move
@@ -428,13 +446,31 @@ mod tests {
     #[test]
     fn tempo_correction_is_antisymmetric_in_side_to_move() {
         let mut b = Board::new();
-        b.kazan = [55, 40];
+        b.kazan = [71, 56]; // 71+56 = 127; +35 board stones = 162
         b.pits[0] = [1, 1, 0, 0, 0, 1, 1, 0, 1];
         b.pits[1] = [0, 2, 5, 0, 8, 3, 4, 0, 8];
         let white = endgame_tempo_correction(&b);
         b.side_to_move = Side::Black;
         let black = endgame_tempo_correction(&b);
         assert_eq!(white, -black);
+    }
+
+    #[test]
+    fn tempo_correction_favours_the_side_with_tempo_over_an_ungated_hoard() {
+        // Regression test for the lock/tempo composition bug (2026-09-12 review):
+        // locked-stone credit must be gated on the owner having any tempo at all. White
+        // has no locked stones but full tempo (36); Black has a 20-stone locked hoard
+        // but ZERO tempo, so Black must break that hoard on its very next move -- it is
+        // not protected material and must earn no credit. Before the fix this position
+        // scored -120 for White (Black's hoard dominated unconditionally); the gated
+        // version must favour White, the side actually holding tempo.
+        let mut b = Board::new();
+        b.kazan = [67, 66]; // 67+66 = 133; +29 board stones = 162
+        b.pits[0] = [1, 1, 1, 1, 1, 1, 1, 1, 1]; // tempo 36, locked 0
+        b.pits[1] = [0, 0, 0, 20, 0, 0, 0, 0, 0]; // tempo 0, locked 20
+        let c = endgame_tempo_correction(&b); // White to move
+        assert_eq!(c, 120, "White (holds tempo) must be favoured, not Black's ungated hoard");
+        assert!(c > 0, "correction must favour the side holding tempo");
     }
 
     #[test]
