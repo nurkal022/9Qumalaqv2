@@ -90,7 +90,7 @@ pub struct EndgameTablebase {
     values: Vec<u8>,
 }
 
-const EGTB_MAGIC: &[u8; 8] = b"TKEGTB01";
+const EGTB_MAGIC: &[u8; 8] = b"TKEGTB02";
 
 impl EndgameTablebase {
     /// Load EGTB from binary file
