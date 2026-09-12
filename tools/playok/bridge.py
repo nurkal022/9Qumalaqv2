@@ -71,7 +71,7 @@ class Bridge:
                  endgame_move_time_ms=12000,
                  my_side=0, orient_flip=False, join_k=None, room=None,
                  accept=False, accept_from=None,
-                 private=True, rated=False, time_min=30, increment_s=0,
+                 private=True, rated=False, time_min=30, time_min_explicit=False, increment_s=0,
                  rematch=False, max_games=0,
                  # random-opponent mode
                  random_mode=False, scout_mode=False, rematch_wait_s=20,
@@ -106,6 +106,12 @@ class Bridge:
         self.private = private
         self.rated = rated
         self.time_min = time_min
+        # True only when the user passed --time-min on the command line. It tells us
+        # whether self.time_min describes a clock we actually know about: when we host
+        # (create the table ourselves, see _setup_table) we always know it; when we join
+        # someone else's table (--join/--accept/--accept-from/scout) we only know it if
+        # the user told us explicitly what the host's clock is.
+        self.time_min_explicit = time_min_explicit
         self.increment_s = increment_s
         # rematch
         self.rematch = rematch
@@ -574,9 +580,21 @@ class Bridge:
     def _compute_and_send(self, pos, mask):
         start = time.monotonic()
         try:
-            clock_left = None if self.time_min == 0 else self.time_min * 60_000 - self.spent_ms
-            budget = move_budget_ms(pos, self.move_time_ms, self.endgame_move_time_ms,
-                                    clock_left_ms=clock_left)
+            # We only know the real game clock when we set it ourselves (we host, see
+            # _setup_table) or when the user told us what it is via an explicit
+            # --time-min (meaningful when joining someone else's table). Otherwise
+            # (default --time-min on a joined table) the clock is the remote host's and
+            # we must not pretend to know it -- clamping the endgame budget against a
+            # clock we don't own is exactly what causes losses on time. In that case
+            # fall back to the plain per-move budget (no endgame escalation, no cap).
+            clock_known = self.time_min_explicit or self.join_k is None
+            if clock_known:
+                clock_left = None if self.time_min == 0 else self.time_min * 60_000 - self.spent_ms
+                budget = move_budget_ms(pos, self.move_time_ms, self.endgame_move_time_ms,
+                                        clock_left_ms=clock_left)
+            else:
+                budget = move_budget_ms(pos, self.move_time_ms, self.move_time_ms,
+                                        clock_left_ms=None)
             pick = self.engine.bestmove(pos, budget)
             if isinstance(pick, tuple):
                 # With the real terminal rule (core fix 2026-09-12) the engine and the
@@ -603,8 +621,12 @@ class Bridge:
         finally:
             # Actual wall time spent, not the requested budget -- covers the engine
             # round-trip and the client.move() network call, and is recorded on every
-            # exit path (including the rule-mismatch return and any exception) so the
-            # clock tracker never undercounts what the game clock actually charged us.
+            # exit path (including the rule-mismatch return and any exception). This is
+            # still only OUR worker thread's wall time: it does not include whatever the
+            # server itself charges around our move (network latency to the server,
+            # server-side processing, etc.), so it can UNDERcount what the real game
+            # clock deducts. Treat spent_ms as a lower bound on time used, not an exact
+            # mirror of the server's clock.
             self.spent_ms += int((time.monotonic() - start) * 1000)
             self.thinking = False
 
@@ -722,8 +744,12 @@ if __name__ == "__main__":
     # table settings
     ap.add_argument("--public", action="store_true", help="public table (default: private)")
     ap.add_argument("--rated", action="store_true", help="rated game (default: non-rated)")
-    ap.add_argument("--time-min", type=int, default=30,
-                    help="game clock per side in minutes (0=unlimited, default: 30)")
+    ap.add_argument("--time-min", type=int, default=None,
+                    help="game clock per side in minutes (0=unlimited, default: 30 when we "
+                         "create the table; when joining someone else's table (--join/"
+                         "--accept/--accept-from/scout) an explicit value tells the bridge "
+                         "what the host's clock is -- leaving it unset means the bridge does "
+                         "NOT assume a clock and falls back to the plain per-move budget)")
     ap.add_argument("--increment", type=int, default=0,
                     help="Fischer increment in seconds (default: 0)")
     # rematch
@@ -745,13 +771,17 @@ if __name__ == "__main__":
     if not args.user or not args.pw:
         raise SystemExit("set --user/--pw or PLAYOK_USER/PLAYOK_PW")
 
+    time_min_explicit = args.time_min is not None
+    effective_time_min = args.time_min if time_min_explicit else 30
+
     b = Bridge(args.user, args.pw, invite=args.invite, dry_run=not args.live,
                move_time_ms=args.move_time_ms, endgame_move_time_ms=args.endgame_move_time_ms,
                my_side=args.my_side,
                orient_flip=args.orient_flip, join_k=args.join, room=args.room,
                accept=args.accept or bool(args.accept_from), accept_from=args.accept_from,
                private=not args.public, rated=args.rated,
-               time_min=args.time_min, increment_s=args.increment,
+               time_min=effective_time_min, time_min_explicit=time_min_explicit,
+               increment_s=args.increment,
                rematch=args.rematch, max_games=args.max_games,
                random_mode=args.random or args.scout, scout_mode=args.scout,
                rematch_wait_s=args.random_wait, min_elo=args.min_elo,
