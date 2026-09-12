@@ -212,14 +212,17 @@ impl Searcher {
     /// Evaluate using NNUE if available, otherwise handcrafted.
     /// NNUE output is divided by NNUE SCALE (64) to convert from quantized
     /// fixed-point back to the model's native scale (~centipawn-like).
-    /// In endgame, adds mobility/stone-preservation bonus to NNUE eval.
+    /// In endgame (<=60 board stones), adds `nnue_endgame_terms` (mobility, starvation
+    /// pressure, finishing bonus, kazan proximity) and `endgame_tempo_correction`
+    /// (tempo-reserve / locked-hoard) on top of the NNUE eval.
     #[inline]
     fn eval(&self, board: &Board) -> i32 {
         if let Some(ref nnue) = self.nnue {
             let base = nnue.evaluate(board) / 64;
 
-            // Endgame correction: reward having more active pits (mobility)
-            // and penalize positions where stones are too concentrated
+            // Count total board stones only to gate the endgame corrections below;
+            // the mobility/stone-preservation terms this comment used to describe now
+            // live in `nnue_endgame_terms` (moved out 2026-09-12).
             let me = board.side_to_move.index();
             let opp = 1 - me;
             let my_stones: u16 = board.pits[me].iter().map(|&x| x as u16).sum();
