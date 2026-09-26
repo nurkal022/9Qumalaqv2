@@ -43,7 +43,7 @@
 ```bash
 git clone -b alphazero https://github.com/nurkal022/9Qumalaqv2.git && cd 9Qumalaqv2
 hf auth login
-HF_REPO=<hf-датасет> bash tools/az_server_setup.sh   # сборка, данные, EGTB; в конце печатает export-ы
+HF_REPO=googlev2/togyz-kumalak-data bash tools/az_server_setup.sh   # сборка, данные, EGTB; в конце печатает export-ы
 # выполнить напечатанные export NVIDIA_LIBS=... ORT_DYLIB_PATH=... EXPERT_DIR=...
 ```
 
