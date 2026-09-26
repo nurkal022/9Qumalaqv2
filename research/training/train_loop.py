@@ -37,7 +37,8 @@ from train_alphazero import load_replay_buffer, export_onnx
 RUST_BINARY = os.path.join(os.path.dirname(__file__), '..', '..', 'target', 'release', 'mcts')
 ENGINE_BINARY = os.path.join(os.path.dirname(__file__), '..', '..', 'engine', 'target', 'release', 'togyzkumalaq-engine')
 
-NVIDIA_LIBS = os.path.expanduser('~/.local/lib/python3.12/site-packages/nvidia')
+# Machine-specific paths: override via env on a server (see docs/ALPHAZERO_3000.md).
+NVIDIA_LIBS = os.environ.get('NVIDIA_LIBS', os.path.expanduser('~/.local/lib/python3.12/site-packages/nvidia'))
 CUDA_LD_PATH = ':'.join([
     f'{NVIDIA_LIBS}/cublas/lib',
     f'{NVIDIA_LIBS}/cuda_runtime/lib',
@@ -45,8 +46,8 @@ CUDA_LD_PATH = ':'.join([
     f'{NVIDIA_LIBS}/cudnn/lib',
     f'{NVIDIA_LIBS}/cufft/lib',
 ])
-ORT_DYLIB = os.path.expanduser('~/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4')
-EXPERT_DIR = os.path.join(os.path.dirname(__file__), '../../game-pars/games')
+ORT_DYLIB = os.environ.get('ORT_DYLIB_PATH', os.path.expanduser('~/.local/lib/python3.12/site-packages/onnxruntime/capi/libonnxruntime.so.1.24.4'))
+EXPERT_DIR = os.environ.get('EXPERT_DIR', os.path.join(os.path.dirname(__file__), '../../game-pars/games'))
 
 
 def rust_league(model_onnx, sp_output, eng_output,

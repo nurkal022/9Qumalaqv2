@@ -154,3 +154,6 @@ runs/
 
 # test engines built beside candidate weights (large binaries, rebuildable)
 models/nets/nnue_v2/eng_*/
+
+# downloaded HF data bundles (tools/az_server_setup.sh)
+.hf-data/
