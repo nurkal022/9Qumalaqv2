@@ -56,7 +56,7 @@ npm --prefix product/web/frontend run build
 ## Данные
 
 Всё, что не код, лежит в **приватном** датасете Hugging Face
-**`HF_REPO_PLACEHOLDER`** (около 8 ГБ исходных данных, упакованных в `tar.zst` общим объёмом 2.4 ГБ).
+**[`googlev2/togyz-kumalak-data`](https://huggingface.co/datasets/googlev2/togyz-kumalak-data)** (около 8 ГБ исходных данных, упакованных в `tar.zst` общим объёмом 2.4 ГБ).
 Внутри архивов пути идут от корня репозитория, поэтому архив распаковывается прямо в клон.
 
 | Архив | Что внутри | Куда распаковывается |
@@ -76,12 +76,12 @@ npm --prefix product/web/frontend run build
 ```bash
 pip install -U huggingface_hub zstd   # или системный zstd
 hf auth login                          # нужен доступ к приватному репо
-hf download HF_REPO_PLACEHOLDER --repo-type dataset --local-dir /tmp/togyz-data
+hf download googlev2/togyz-kumalak-data --repo-type dataset --local-dir /tmp/togyz-data
 cd /tmp/togyz-data && sha256sum -c SHA256SUMS
 for f in *.tar.zst; do tar -I zstd -xf "$f" -C /path/to/9Qumalaqv2; done
 ```
 
-Можно скачать один архив: `hf download HF_REPO_PLACEHOLDER models.tar.zst --repo-type dataset --local-dir .`
+Можно скачать один архив: `hf download googlev2/togyz-kumalak-data models.tar.zst --repo-type dataset --local-dir .`
 
 ## Ветки
 
