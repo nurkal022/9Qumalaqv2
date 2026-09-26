@@ -10,7 +10,7 @@ import shutil
 import numpy as np
 import onnxruntime as ort
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../alphazero-code/alphazero'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'alphazero'))
 from game import TogyzQumalaq, Player
 
 

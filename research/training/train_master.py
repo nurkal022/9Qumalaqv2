@@ -20,7 +20,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../alphazero-code/alphazero'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'alphazero'))
 from model import create_model
 from game import TogyzQumalaq, Player
 

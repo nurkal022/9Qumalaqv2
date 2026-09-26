@@ -7,7 +7,7 @@ import sys, os, argparse, subprocess, tempfile, shutil
 import numpy as np
 import torch
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../alphazero-code/alphazero'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'alphazero'))
 from game import TogyzQumalaq, Player
 from model import create_model
 from train_config_b import ConfigurableMCTS, get_engine_move

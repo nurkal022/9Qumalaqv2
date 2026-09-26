@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression guard for the end-game SWEEP rule in the training referee.
 
-The Python game logic (alphazero-code/alphazero/game.py) generates every NN value
+The Python game logic (research/alphazero/game.py) generates every NN value
 label. It used to compare RAW kazans at an empty-side terminal, giving the wrong
 winner on ~54% of such terminals (proven against PlayOK results 96/96). The correct
 rule sweeps each side's remaining board stones into its own kazan first. This test
@@ -14,7 +14,7 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "alphazero-code", "alphazero"))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "alphazero"))
 from game import TogyzQumalaq, GameState, Player  # noqa: E402
 
 

@@ -28,7 +28,7 @@ unchanged.
 import sys, os, subprocess, math, time, threading, json
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-GAME_DIR = os.path.join(ROOT, "archive/old-impls/alphazero-code/alphazero")
+GAME_DIR = os.path.join(ROOT, "research/alphazero")
 assert os.path.isfile(os.path.join(GAME_DIR, "game.py")), f"rules class not found at {GAME_DIR}/game.py"
 sys.path.insert(0, GAME_DIR)
 from game import TogyzQumalaq  # noqa: E402

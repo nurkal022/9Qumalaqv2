@@ -14,7 +14,7 @@ Usage:
 import sys, os, json, argparse, struct
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../alphazero-code/alphazero'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'alphazero'))
 
 def download_games(host, password, output_dir='master_games'):
     """Download game logs from server."""
