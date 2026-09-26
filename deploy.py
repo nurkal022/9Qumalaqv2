@@ -4,14 +4,17 @@ import paramiko
 import os
 import sys
 
-HOST = '5.129.198.203'
-USER = 'root'
-PASS = 'REDACTED'
-REMOTE_DIR = '/opt/togyzkumalaq'
+# Credentials come from the environment, never from the repository.
+HOST = os.environ.get('DEPLOY_HOST')
+USER = os.environ.get('DEPLOY_USER', 'root')
+PASS = os.environ.get('DEPLOY_PASS')  # prefer SSH keys; password is optional
+REMOTE_DIR = os.environ.get('DEPLOY_DIR', '/opt/togyzkumalaq')
 
 def main():
     ssh = paramiko.SSHClient()
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    if not HOST:
+        sys.exit("Set DEPLOY_HOST (and DEPLOY_USER / DEPLOY_PASS or an SSH key)")
     print(f"Connecting to {HOST}...")
     ssh.connect(HOST, username=USER, password=PASS)
     print("Connected!")

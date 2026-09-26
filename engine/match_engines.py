@@ -1,226 +1,314 @@
 #!/usr/bin/env python3
-"""Match two engine binaries against each other via serve protocol."""
-import subprocess, sys, os, random, time
+"""A/B match of two engine builds via the `serve` protocol.
+
+Referee uses the official game-end rule (atsyz qalu): the game ends when
+the side to move has no stones; the stones left on the board go to the
+player on whose side they lie.
+
+Methodology (so results mean something):
+  * games are played in pairs — the same random opening with colors swapped,
+    which cancels most of the opening/first-move bias;
+  * several pairs run in parallel, each worker pinned to its own CPU core
+      (both engines of a game share that core, they never think at once);
+  * reports Elo with a 95% confidence interval and an SPRT log-likelihood
+    ratio, and stops early once the SPRT bounds are crossed.
+
+Examples:
+  # new build vs baseline, same weights (engine/ dir), 100 ms/move
+  python3 match_engines.py --a target/release/togyzkumalaq-engine \\
+      --b /path/to/engine_old --games 400 --time 100
+
+  # two different NNUE nets: point each engine at a dir with its own
+  # nnue_weights.bin (plus optional opening_book.txt / egtb.bin)
+  python3 match_engines.py --a ./engine --dir-a netA/ --b ./engine --dir-b netB/
+"""
+import argparse
+import math
+import multiprocessing as mp
+import os
+import random
+import subprocess
+import sys
 
 NUM_PITS = 9
-INITIAL_STONES = 9
+
 
 class Board:
     def __init__(self):
-        self.pits = [[INITIAL_STONES]*NUM_PITS, [INITIAL_STONES]*NUM_PITS]
+        self.pits = [[9] * NUM_PITS, [9] * NUM_PITS]
         self.kazan = [0, 0]
         self.tuzdyk = [-1, -1]
         self.side_to_move = 0
-        self.move_count = 0
 
     def to_pos(self):
-        wp = ','.join(str(x) for x in self.pits[0])
-        bp = ','.join(str(x) for x in self.pits[1])
-        k = f"{self.kazan[0]},{self.kazan[1]}"
-        t = f"{self.tuzdyk[0]},{self.tuzdyk[1]}"
-        return f"{wp}/{bp}/{k}/{t}/{self.side_to_move}"
+        wp = ','.join(map(str, self.pits[0]))
+        bp = ','.join(map(str, self.pits[1]))
+        return (f"{wp}/{bp}/{self.kazan[0]},{self.kazan[1]}/"
+                f"{self.tuzdyk[0]},{self.tuzdyk[1]}/{self.side_to_move}")
 
     def valid_moves(self):
-        me = self.side_to_move
-        opp = 1 - me
-        opp_tuz = self.tuzdyk[opp]
-        return [i for i in range(NUM_PITS) if self.pits[me][i] > 0 and opp_tuz != i]
-
-    def can_create_tuzdyk(self, player, pit_index):
-        if self.tuzdyk[player] != -1: return False
-        if pit_index == 8: return False
-        if self.tuzdyk[1 - player] == pit_index: return False
-        return True
-
-    def is_terminal(self):
-        if self.kazan[0] >= 82 or self.kazan[1] >= 82: return True
-        return all(x == 0 for x in self.pits[0]) or all(x == 0 for x in self.pits[1])
+        me, opp = self.side_to_move, 1 - self.side_to_move
+        return [i for i in range(NUM_PITS)
+                if self.pits[me][i] > 0 and self.tuzdyk[opp] != i]
 
     def game_result(self):
-        """Returns 0=white wins, 1=black wins, 2=draw, None=not terminal"""
-        if self.kazan[0] >= 82: return 0
-        if self.kazan[1] >= 82: return 1
-        if self.kazan[0] == 81 and self.kazan[1] == 81: return 2
-        w_empty = all(x == 0 for x in self.pits[0])
-        b_empty = all(x == 0 for x in self.pits[1])
-        if w_empty or b_empty:
-            # Collect remaining stones
-            k0 = self.kazan[0] + sum(self.pits[0])
-            k1 = self.kazan[1] + sum(self.pits[1])
-            if k0 > k1: return 0
-            if k1 > k0: return 1
-            return 2
+        """0 = white wins, 1 = black wins, 2 = draw, None = game goes on."""
+        if self.kazan[0] >= 82:
+            return 0
+        if self.kazan[1] >= 82:
+            return 1
+        me, opp = self.side_to_move, 1 - self.side_to_move
+        if all(x == 0 for x in self.pits[me]):
+            k_me = self.kazan[me]
+            k_opp = self.kazan[opp] + sum(self.pits[opp])
+            if k_me == k_opp:
+                return 2
+            return me if k_me > k_opp else opp
         return None
 
-    def make_move(self, pit_index):
-        me = self.side_to_move
-        opp = 1 - me
-        stones = self.pits[me][pit_index]
-        if stones <= 0: return False
-        self.pits[me][pit_index] = 0
-        current_pit = pit_index
-        current_side = me
+    def make_move(self, pit):
+        me, opp = self.side_to_move, 1 - self.side_to_move
+        stones = self.pits[me][pit]
+        assert stones > 0
+        self.pits[me][pit] = 0
+        side, cur = me, pit
         if stones == 1:
-            current_pit += 1
-            if current_pit > 8:
-                current_pit = 0
-                current_side = opp
-            if current_side == opp and self.tuzdyk[me] == current_pit:
+            to_sow = 1
+        else:
+            self.pits[me][pit] += 1
+            to_sow = stones - 1
+        for _ in range(to_sow):
+            cur += 1
+            if cur > 8:
+                cur = 0
+                side = 1 - side
+            if side == opp and self.tuzdyk[me] == cur:
                 self.kazan[me] += 1
-            elif current_side == me and self.tuzdyk[opp] == current_pit:
+            elif side == me and self.tuzdyk[opp] == cur:
                 self.kazan[opp] += 1
             else:
-                self.pits[current_side][current_pit] += 1
-        else:
-            self.pits[current_side][current_pit] += 1
-            remaining = stones - 1
-            while remaining > 0:
-                current_pit += 1
-                if current_pit > 8:
-                    current_pit = 0
-                    current_side = 1 - current_side
-                if current_side == opp and self.tuzdyk[me] == current_pit:
-                    self.kazan[me] += 1
-                elif current_side == me and self.tuzdyk[opp] == current_pit:
-                    self.kazan[opp] += 1
-                else:
-                    self.pits[current_side][current_pit] += 1
-                remaining -= 1
-        is_tuz = (current_side == opp and self.tuzdyk[me] == current_pit) or \
-                 (current_side == me and self.tuzdyk[opp] == current_pit)
-        if current_side == opp and not is_tuz:
-            count = self.pits[opp][current_pit]
-            if count == 3 and self.can_create_tuzdyk(me, current_pit):
-                self.tuzdyk[me] = current_pit
+                self.pits[side][cur] += 1
+        on_tuz = ((side == opp and self.tuzdyk[me] == cur) or
+                  (side == me and self.tuzdyk[opp] == cur))
+        if side == opp and not on_tuz:
+            count = self.pits[opp][cur]
+            if (count == 3 and self.tuzdyk[me] == -1 and cur != 8
+                    and self.tuzdyk[opp] != cur):
+                self.tuzdyk[me] = cur
                 self.kazan[me] += count
-                self.pits[opp][current_pit] = 0
+                self.pits[opp][cur] = 0
             elif count % 2 == 0 and count > 0:
                 self.kazan[me] += count
-                self.pits[opp][current_pit] = 0
-        self.side_to_move = 1 - self.side_to_move
-        self.move_count += 1
-        return True
+                self.pits[opp][cur] = 0
+        self.side_to_move = opp
 
 
 class Engine:
-    def __init__(self, binary, nnue_weights):
-        # cwd must be the engine directory where weights/egtb files live
-        engine_dir = os.path.dirname(os.path.abspath(nnue_weights))
+    def __init__(self, binary, workdir, cpu):
+        cmd = [os.path.abspath(binary), 'serve']
+        if cpu is not None and sys.platform.startswith('linux'):
+            cmd = ['taskset', '-c', str(cpu)] + cmd
         self.proc = subprocess.Popen(
-            [os.path.abspath(binary), 'serve'],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1,
-            cwd=engine_dir,
-        )
+            cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            cwd=os.path.abspath(workdir))
         line = self.proc.stdout.readline().strip()
         if line != 'ready':
-            raise RuntimeError(f"Engine failed to start: {line}")
+            raise RuntimeError(f"{binary}: engine failed to start: {line!r}")
 
-    def get_move(self, pos, time_ms=500):
-        self.proc.stdin.write(f'go time {time_ms} pos {pos}\n')
+    def cmd(self, line):
+        self.proc.stdin.write(line + '\n')
         self.proc.stdin.flush()
-        line = self.proc.stdout.readline().strip()
-        if line.startswith('bestmove'):
-            parts = line.split()
-            for i, p in enumerate(parts):
-                if p == 'bestmove' and i+1 < len(parts):
-                    return int(parts[i+1])
-        if line.startswith('terminal'):
-            return -1
-        return -1
+        return self.proc.stdout.readline().strip()
 
     def newgame(self):
-        self.proc.stdin.write('newgame\n')
-        self.proc.stdin.flush()
-        self.proc.stdout.readline()
+        self.cmd('newgame')
+
+    def position(self, pos):
+        self.cmd(f'position {pos}')
+
+    def go(self, pos, time_ms):
+        parts = self.cmd(f'go time {time_ms} pos {pos}').split()
+        if len(parts) >= 2 and parts[0] == 'bestmove':
+            return int(parts[1])
+        return -1
 
     def close(self):
         try:
             self.proc.stdin.write('quit\n')
             self.proc.stdin.flush()
             self.proc.wait(timeout=3)
-        except:
+        except Exception:
             self.proc.kill()
 
 
-def play_game(eng_a, eng_b, time_ms=500, random_opening_plies=4):
-    board = Board()
-    eng_a.newgame()
-    eng_b.newgame()
-    # Random opening
-    for _ in range(random_opening_plies):
-        moves = board.valid_moves()
-        if not moves or board.is_terminal(): break
-        board.make_move(random.choice(moves))
-    # Play
-    for _ in range(300):
-        if board.is_terminal(): break
-        r = board.game_result()
-        if r is not None: break
-        eng = eng_a if board.side_to_move == 0 else eng_b
-        mv = eng.get_move(board.to_pos(), time_ms)
-        if mv < 0: break
-        if mv not in board.valid_moves():
+def random_opening(rng, plies):
+    board, moves = Board(), []
+    for _ in range(plies):
+        legal = board.valid_moves()
+        if not legal or board.game_result() is not None:
             break
+        m = rng.choice(legal)
+        board.make_move(m)
+        moves.append(m)
+    return moves
+
+
+def play_game(white, black, opening, time_ms, max_plies):
+    """Returns 0/1/2 (white win / black win / draw) and the ply count."""
+    board = Board()
+    engines = (white, black)
+    for e in engines:
+        e.newgame()
+    for m in opening:
+        board.make_move(m)
+    # Both engines learn the opening positions for repetition detection.
+    for e in engines:
+        e.position(board.to_pos())
+    plies = 0
+    while board.game_result() is None and plies < max_plies:
+        eng = engines[board.side_to_move]
+        mv = eng.go(board.to_pos(), time_ms)
+        if mv not in board.valid_moves():
+            # Illegal/no move: forfeit.
+            return 1 - board.side_to_move, plies
         board.make_move(mv)
+        engines[board.side_to_move].position(board.to_pos())
+        plies += 1
     r = board.game_result()
-    if r is None:
-        # Collect remaining
+    if r is None:  # adjudicate by material incl. stones on own side
         k0 = board.kazan[0] + sum(board.pits[0])
         k1 = board.kazan[1] + sum(board.pits[1])
-        if k0 > k1: r = 0
-        elif k1 > k0: r = 1
-        else: r = 2
-    return r
+        r = 2 if k0 == k1 else (0 if k0 > k1 else 1)
+    return r, plies
+
+
+def worker(args, cpu, jobs, results):
+    a = Engine(args.a, args.dir_a, cpu)
+    b = Engine(args.b, args.dir_b, cpu)
+    try:
+        while True:
+            job = jobs.get()
+            if job is None:
+                break
+            opening = job
+            pair = []
+            # Game 1: A white. Game 2: B white. Score from A's point of view.
+            r, _ = play_game(a, b, opening, args.time, args.max_plies)
+            pair.append({0: 1.0, 1: 0.0, 2: 0.5}[r])
+            r, _ = play_game(b, a, opening, args.time, args.max_plies)
+            pair.append({0: 0.0, 1: 1.0, 2: 0.5}[r])
+            results.put(pair)
+    finally:
+        a.close()
+        b.close()
+
+
+def elo(score):
+    score = min(max(score, 1e-6), 1 - 1e-6)
+    return -400 * math.log10(1 / score - 1)
+
+
+def pentanomial_stats(pairs):
+    """Mean score and its std. error, treating each game pair as one sample
+    (pairs with the same opening are correlated, so this is the honest
+    variance estimate)."""
+    n = len(pairs)
+    xs = [sum(p) / 2 for p in pairs]
+    mean = sum(xs) / n
+    var = sum((x - mean) ** 2 for x in xs) / max(n - 1, 1)
+    return mean, math.sqrt(var / n)
+
+
+def sprt_llr(pairs, elo0, elo1):
+    """Normal-approximation GSPRT on pair scores (as in fishtest)."""
+    n = len(pairs)
+    if n < 2:
+        return 0.0
+    mean, se = pentanomial_stats(pairs)
+    var = (se ** 2) * n
+    if var <= 0:
+        return 0.0
+    s0 = 1 / (1 + 10 ** (-elo0 / 400))
+    s1 = 1 / (1 + 10 ** (-elo1 / 400))
+    return n * (s1 - s0) * (2 * mean - s0 - s1) / (2 * var)
 
 
 def main():
-    if len(sys.argv) < 4:
-        print("Usage: match_engines.py <binary_a> <binary_b> <nnue_weights> [games=200] [time_ms=500]")
-        sys.exit(1)
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    here = os.path.dirname(os.path.abspath(__file__))
+    p.add_argument('--a', required=True, help='engine A binary (the candidate)')
+    p.add_argument('--b', required=True, help='engine B binary (the baseline)')
+    p.add_argument('--dir-a', default=here, help='cwd for A (nnue_weights.bin, book, egtb)')
+    p.add_argument('--dir-b', default=here, help='cwd for B')
+    p.add_argument('--games', type=int, default=400, help='max games (rounded to pairs)')
+    p.add_argument('--time', type=int, default=100, help='ms per move')
+    p.add_argument('--concurrency', type=int, default=os.cpu_count() or 1)
+    p.add_argument('--cpu-offset', type=int, default=0,
+                   help='first CPU to pin workers to (to run two matches side by side)')
+    p.add_argument('--opening-plies', type=int, default=6)
+    p.add_argument('--max-plies', type=int, default=400)
+    p.add_argument('--seed', type=int, default=1)
+    p.add_argument('--elo0', type=float, default=0.0)
+    p.add_argument('--elo1', type=float, default=10.0)
+    p.add_argument('--alpha', type=float, default=0.05)
+    p.add_argument('--beta', type=float, default=0.05)
+    p.add_argument('--no-sprt', action='store_true', help='play all games, no early stop')
+    args = p.parse_args()
 
-    bin_a, bin_b, weights = sys.argv[1], sys.argv[2], sys.argv[3]
-    games = int(sys.argv[4]) if len(sys.argv) > 4 else 200
-    time_ms = int(sys.argv[5]) if len(sys.argv) > 5 else 500
+    n_pairs = max(1, args.games // 2)
+    rng = random.Random(args.seed)
+    jobs, results = mp.Queue(), mp.Queue()
+    for _ in range(n_pairs):
+        jobs.put(random_opening(rng, args.opening_plies))
+    for _ in range(args.concurrency):
+        jobs.put(None)
 
-    print(f"Engine A: {os.path.basename(bin_a)}")
-    print(f"Engine B: {os.path.basename(bin_b)}")
-    print(f"Weights: {os.path.basename(weights)}")
-    print(f"Games: {games}, Time: {time_ms}ms")
+    lower = math.log(args.beta / (1 - args.alpha))
+    upper = math.log((1 - args.beta) / args.alpha)
+    print(f"A: {args.a} [{args.dir_a}]\nB: {args.b} [{args.dir_b}]")
+    print(f"{n_pairs * 2} games max, {args.time} ms/move, {args.concurrency} workers, "
+          f"SPRT elo0={args.elo0} elo1={args.elo1} bounds=({lower:.2f}, {upper:.2f})")
 
-    eng_a = Engine(bin_a, weights)
-    eng_b = Engine(bin_b, weights)
+    procs = [mp.Process(target=worker, args=(args, (args.cpu_offset + i) % (os.cpu_count() or 1), jobs, results))
+             for i in range(args.concurrency)]
+    for pr in procs:
+        pr.start()
 
-    wins_a, wins_b, draws = 0, 0, 0
-    for g in range(games):
-        # Alternate colors
-        if g % 2 == 0:
-            r = play_game(eng_a, eng_b, time_ms)
-            if r == 0: wins_a += 1
-            elif r == 1: wins_b += 1
-            else: draws += 1
-        else:
-            r = play_game(eng_b, eng_a, time_ms)
-            if r == 1: wins_a += 1
-            elif r == 0: wins_b += 1
-            else: draws += 1
+    pairs, w, d, l = [], 0, 0, 0
+    verdict = None
+    try:
+        for _ in range(n_pairs):
+            pair = results.get()
+            pairs.append(pair)
+            for s in pair:
+                w += s == 1.0
+                d += s == 0.5
+                l += s == 0.0
+            mean, se = pentanomial_stats(pairs)
+            llr = sprt_llr(pairs, args.elo0, args.elo1)
+            if len(pairs) % 10 == 0 or len(pairs) == n_pairs:
+                lo, hi = elo(mean - 1.96 * se), elo(mean + 1.96 * se)
+                print(f"  {2 * len(pairs):4d} games  A {w}W {d}D {l}L  "
+                      f"{mean * 100:5.1f}%  Elo {elo(mean):+6.1f} [{lo:+.0f}, {hi:+.0f}]  "
+                      f"LLR {llr:+.2f}", flush=True)
+            if not args.no_sprt and len(pairs) >= 20:
+                if llr >= upper:
+                    verdict = 'H1 accepted: A is stronger'
+                    break
+                if llr <= lower:
+                    verdict = 'H0 accepted: A is not stronger'
+                    break
+    finally:
+        for pr in procs:
+            pr.terminate()
 
-        if (g+1) % 20 == 0:
-            total = wins_a + wins_b + draws
-            score = (wins_a + draws * 0.5) / total * 100
-            print(f"  [{g+1}/{games}] A: {wins_a}W {draws}D {wins_b}L ({score:.1f}%)")
-
-    total = wins_a + wins_b + draws
-    score = (wins_a + draws * 0.5) / total
-    import math
-    if 0 < score < 1:
-        elo = -400 * math.log10(1/score - 1)
-    else:
-        elo = 999 if score >= 1 else -999
-    print(f"\nFinal: A {wins_a}W - {draws}D - {wins_b}L ({score*100:.1f}%, Elo {elo:+.0f})")
-
-    eng_a.close()
-    eng_b.close()
+    mean, se = pentanomial_stats(pairs)
+    lo, hi = elo(mean - 1.96 * se), elo(mean + 1.96 * se)
+    print(f"\nFinal: {2 * len(pairs)} games, A {w}W {d}D {l}L ({mean * 100:.1f}%)")
+    print(f"Elo A-B: {elo(mean):+.1f}  95% CI [{lo:+.1f}, {hi:+.1f}]")
+    print(f"SPRT: {verdict or 'inconclusive'} (LLR {sprt_llr(pairs, args.elo0, args.elo1):+.2f})")
 
 
 if __name__ == '__main__':

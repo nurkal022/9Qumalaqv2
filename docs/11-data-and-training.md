@@ -220,7 +220,7 @@ python3 train_custom_k.py 400 0.75 nnue_weights.bin
 
 | Скрипт | Назначение |
 |--------|-----------|
-| [`match_engines.py`](../engine/match_engines.py) | матч двух сборок |
+| [`match_engines.py`](../engine/match_engines.py) | **основной A/B-стенд**: матч двух сборок/сетей по официальным правилам, парные дебюты, параллельные партии, Elo ± 95% ДИ и SPRT |
 | [`match_search.py`](../engine/match_search.py) | сравнение настроек поиска |
 | [`selfplay_loop.py`](../engine/selfplay_loop.py) | цикл «генерация → обучение → проверка» |
 | [`pipeline.py`](../engine/pipeline.py) | полный автоматизированный пайплайн (551 строка) |
@@ -231,6 +231,28 @@ python3 train_custom_k.py 400 0.75 nnue_weights.bin
 ./togyzkumalaq-engine match 100 1000                        # 100 партий по 1 с
 ./togyzkumalaq-engine match-nnue old.bin new.bin 100 1000   # сравнение весов
 ```
+
+### Как проверять изменения
+
+50–100 партий дают доверительный интервал ±70–100 Elo — этого не хватает,
+чтобы отличить улучшение от шума (отсюда «разброс по сидам» и противоречивые
+выводы в [12-results.md](12-results.md)). Любое изменение поиска, оценки или
+весов проверяйте через `match_engines.py`:
+
+```bash
+cd engine
+cp target/release/togyzkumalaq-engine /tmp/engine_base    # эталон ДО изменения
+# ... правки, cargo build --release ...
+python3 match_engines.py --a target/release/togyzkumalaq-engine --b /tmp/engine_base \
+    --games 2000 --time 100 --elo0 0 --elo1 10
+# разные сети: каталоги со своими nnue_weights.bin
+python3 match_engines.py --a ./target/release/togyzkumalaq-engine --dir-a netA/ \
+    --b ./target/release/togyzkumalaq-engine --dir-b netB/
+```
+
+Каждая пара партий играется с одним и тем же случайным дебютом и сменой цвета;
+SPRT останавливает матч, как только результат статистически ясен. Принимать
+изменение — только при `H1 accepted`.
 
 ---
 

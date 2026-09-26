@@ -90,7 +90,9 @@ pub struct EndgameTablebase {
     values: Vec<u8>,
 }
 
-const EGTB_MAGIC: &[u8; 8] = b"TKEGTB01";
+/// v02: tables built with the official game-end rule (see Board::game_result).
+/// v01 files were solved under the old "either side empty" rule and are rejected.
+const EGTB_MAGIC: &[u8; 8] = b"TKEGTB02";
 
 impl EndgameTablebase {
     /// Load EGTB from binary file
@@ -103,7 +105,7 @@ impl EndgameTablebase {
             .read_exact(&mut magic)
             .map_err(|e| format!("Read magic: {}", e))?;
         if &magic != EGTB_MAGIC {
-            return Err("Invalid EGTB magic".to_string());
+            return Err("Invalid EGTB magic (stale table? regenerate with `egtb-gen`)".to_string());
         }
 
         let mut buf4 = [0u8; 4];

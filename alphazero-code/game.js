@@ -448,18 +448,23 @@ class GameState {
         return true;
     }
     
+    // Atsyz qalu: the game ends when the side to move has no stones;
+    // stones left on the board go to the owner of the side they lie on.
     isGameOver() {
         if (this.kazan.white >= 82 || this.kazan.black >= 82) return true;
-        const whiteEmpty = this.pits.white.every(p => p === 0);
-        const blackEmpty = this.pits.black.every(p => p === 0);
-        return whiteEmpty || blackEmpty;
+        return this.pits[this.currentPlayer].every(p => p === 0);
     }
     
     getWinner() {
         if (this.kazan.white >= 82) return 'white';
         if (this.kazan.black >= 82) return 'black';
-        if (this.kazan.white > this.kazan.black) return 'white';
-        if (this.kazan.black > this.kazan.white) return 'black';
+        const me = this.currentPlayer, opp = this.getOpponent(me);
+        const total = { [me]: this.kazan[me], [opp]: this.kazan[opp] };
+        if (this.pits[me].every(p => p === 0)) {
+            total[opp] += this.pits[opp].reduce((a, b) => a + b, 0);
+        }
+        if (total.white > total.black) return 'white';
+        if (total.black > total.white) return 'black';
         return 'draw';
     }
     

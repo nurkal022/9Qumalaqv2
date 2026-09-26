@@ -194,15 +194,17 @@ class TogyzQumalaq:
         if self.state.kazan[Player.BLACK] >= self.WIN_THRESHOLD:
             return Player.BLACK
         
-        # Check if any side is empty
-        white_empty = np.all(self.state.pits[Player.WHITE] == 0)
-        black_empty = np.all(self.state.pits[Player.BLACK] == 0)
-        
-        if white_empty or black_empty:
-            if self.state.kazan[Player.WHITE] > self.state.kazan[Player.BLACK]:
-                return Player.WHITE
-            elif self.state.kazan[Player.BLACK] > self.state.kazan[Player.WHITE]:
-                return Player.BLACK
+        # Atsyz qalu: the game ends when the side TO MOVE has no stones;
+        # stones left on the board go to the owner of the side they lie on.
+        me = self.state.current_player
+        opp = 1 - me
+        if np.all(self.state.pits[me] == 0):
+            my_total = int(self.state.kazan[me])
+            opp_total = int(self.state.kazan[opp]) + int(np.sum(self.state.pits[opp]))
+            if my_total > opp_total:
+                return me
+            elif opp_total > my_total:
+                return opp
             else:
                 return 2  # Draw
         

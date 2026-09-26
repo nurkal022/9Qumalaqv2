@@ -23,12 +23,14 @@
 | [11-data-and-training.md](11-data-and-training.md) | Данные, парсинг партий, пайплайн обучения NNUE |
 | [12-results.md](12-results.md) | Результаты экспериментов и прогресс по Elo |
 | [13-known-issues.md](13-known-issues.md) | Известные проблемы и технический долг |
+| [14-improvement-plan.md](14-improvement-plan.md) | **Аудит: найденные ошибки, их эффект в Elo и план улучшений** |
 
 ## С чего начать
 
 - **Хочу запустить** → [03-build-and-run.md](03-build-and-run.md)
 - **Хочу понять, как играет движок** → [04-search.md](04-search.md) + [05-evaluation.md](05-evaluation.md)
 - **Хочу обучить свою сеть** → [11-data-and-training.md](11-data-and-training.md)
+- **Хочу усилить движок** → [14-improvement-plan.md](14-improvement-plan.md)
 - **Хочу поправить баги** → [13-known-issues.md](13-known-issues.md)
 
 ## Важно перед работой с репозиторием

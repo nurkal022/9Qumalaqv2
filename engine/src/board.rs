@@ -120,7 +120,7 @@ impl Board {
         let opp = self.side_to_move.opposite().index();
 
         // Save state for unmake
-        let undo = UndoInfo {
+        let mut undo = UndoInfo {
             pit_index,
             stones_picked: self.pits[me][pit_index],
             captured: 0,
@@ -189,6 +189,7 @@ impl Board {
             if count == 3 && self.can_create_tuzdyk(me, current_pit) {
                 // Tuzdyk creation
                 self.tuzdyk[me] = current_pit as i8;
+                undo.tuzdyk_created = current_pit as i8;
                 self.kazan[me] += count;
                 self.pits[opp][current_pit] = 0;
             } else if count % 2 == 0 && count > 0 {
@@ -246,18 +247,23 @@ impl Board {
             return Some(GameResult::Win(Side::Black));
         }
 
-        // Check if either side is empty
-        let white_empty = self.pits[0].iter().all(|&x| x == 0);
-        let black_empty = self.pits[1].iter().all(|&x| x == 0);
-
-        if white_empty || black_empty {
-            if self.kazan[0] > self.kazan[1] {
-                return Some(GameResult::Win(Side::White));
-            } else if self.kazan[1] > self.kazan[0] {
-                return Some(GameResult::Win(Side::Black));
+        // Atsyz qalu: the game ends only when the side TO MOVE has no stones.
+        // The remaining stones belong to the player on whose side they lie,
+        // i.e. the opponent collects everything left on their own side.
+        // An empty side of the player who just moved does NOT end the game:
+        // the opponent still moves and may sow stones back onto it.
+        let me = self.side_to_move.index();
+        let opp = 1 - me;
+        if self.pits[me].iter().all(|&x| x == 0) {
+            let my_total = self.kazan[me] as u16;
+            let opp_total = self.kazan[opp] as u16 + self.pits[opp].iter().map(|&x| x as u16).sum::<u16>();
+            return Some(if my_total > opp_total {
+                GameResult::Win(self.side_to_move)
+            } else if opp_total > my_total {
+                GameResult::Win(self.side_to_move.opposite())
             } else {
-                return Some(GameResult::Draw);
-            }
+                GameResult::Draw
+            });
         }
 
         None
@@ -429,6 +435,56 @@ mod tests {
         let mut b = Board::new();
         b.kazan[0] = 82;
         assert_eq!(b.game_result(), Some(GameResult::Win(Side::White)));
+    }
+
+    #[test]
+    fn test_empty_side_not_to_move_is_not_terminal() {
+        // White sows its last stone onto Black's side. White is now empty,
+        // but it is Black's turn and Black can still move: game goes on.
+        let mut b = Board::new();
+        b.pits[0] = [0, 0, 0, 0, 0, 0, 0, 0, 1];
+        b.pits[1] = [4, 3, 2, 1, 1, 1, 1, 1, 1];
+        b.kazan = [76, 70];
+        b.make_move(8);
+        assert!(b.pits[0].iter().all(|&x| x == 0));
+        assert_eq!(b.side_to_move, Side::Black);
+        assert_eq!(b.game_result(), None);
+    }
+
+    #[test]
+    fn test_atsyz_remaining_stones_go_to_owner() {
+        // White to move with an empty side: Black collects the 16 stones on
+        // its own side (70 + 16 = 86 > 76), so Black wins despite trailing
+        // in kazan.
+        let mut b = Board::new();
+        b.pits[0] = [0; 9];
+        b.pits[1] = [5, 3, 2, 1, 1, 1, 1, 1, 1];
+        b.kazan = [76, 70];
+        b.side_to_move = Side::White;
+        assert_eq!(b.game_result(), Some(GameResult::Win(Side::Black)));
+    }
+
+    #[test]
+    fn test_atsyz_draw_81_81() {
+        let mut b = Board::new();
+        b.pits[0] = [0; 9];
+        b.pits[1] = [0, 0, 0, 0, 0, 0, 0, 0, 11];
+        b.kazan = [81, 70];
+        b.side_to_move = Side::White;
+        assert_eq!(b.game_result(), Some(GameResult::Draw));
+    }
+
+    #[test]
+    fn test_unmake_restores_tuzdyk() {
+        let mut b = Board::new();
+        b.pits[0] = [0, 0, 0, 0, 0, 0, 0, 0, 2];
+        b.pits[1] = [2, 5, 0, 0, 0, 0, 0, 0, 0];
+        b.kazan = [75, 78];
+        let before = b;
+        let undo = b.make_move(8);
+        assert_eq!(b.tuzdyk[0], 0);
+        b.unmake_move(&undo);
+        assert_eq!(b, before);
     }
 
     #[test]
