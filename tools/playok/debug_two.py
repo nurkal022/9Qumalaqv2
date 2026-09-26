@@ -504,9 +504,9 @@ def main():
     cfg = ap.parse_args()
 
     a_user = os.environ.get("A_USER", "alemgamer")
-    a_pw   = os.environ.get("A_PW",   "REDACTED")
+    a_pw   = os.environ["A_PW"]
     b_user = os.environ.get("B_USER", "nurkal022")
-    b_pw   = os.environ.get("B_PW",   "REDACTED")
+    b_pw   = os.environ["B_PW"]
 
     a = PlayokClient(a_user, a_pw, verbose=False)
     b = PlayokClient(b_user, b_pw, verbose=False)

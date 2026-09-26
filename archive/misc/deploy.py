@@ -6,7 +6,7 @@ import sys
 
 HOST = '85.239.36.121'
 USER = 'root'
-PASS = 'REDACTED'
+PASS = os.environ["DEPLOY_PASSWORD"]  # never hardcode — the old value leaked and must be rotated
 REMOTE_DIR = '/opt/togyzkumalaq'
 
 def main():
