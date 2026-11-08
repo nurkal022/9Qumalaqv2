@@ -62,3 +62,24 @@ if __name__ == "__main__":
         if name.startswith("test_") and callable(fn):
             fn()
             print("OK", name)
+
+
+def test_increment_budget_spends_endgame_time_while_clock_is_healthy():
+    # 5+3 blitz, 200 s left, 45 s reserve: (155 s / 6) + 2.4 s > 12 s endgame budget
+    assert move_budget_ms(FORTY, 1800, 12000, clock_left_ms=200_000, reserve_ms=45_000,
+                          increment_ms=3000) == 12000
+
+
+def test_increment_budget_shrinks_smoothly_and_never_flags():
+    b100 = move_budget_ms(FORTY, 1800, 12000, clock_left_ms=100_000, reserve_ms=45_000, increment_ms=3000)
+    b60 = move_budget_ms(FORTY, 1800, 12000, clock_left_ms=60_000, reserve_ms=45_000, increment_ms=3000)
+    b30 = move_budget_ms(FORTY, 1800, 12000, clock_left_ms=30_000, reserve_ms=45_000, increment_ms=3000)
+    assert 12000 >= b100 > b60 > b30 > 0
+    assert b30 == 2400                       # below the reserve: 0.8 x increment
+    assert move_budget_ms(FORTY, 1800, 12000, clock_left_ms=3000, reserve_ms=45_000,
+                          increment_ms=3000) == 1500    # never more than half the clock
+
+
+def test_increment_budget_midgame_keeps_base():
+    assert move_budget_ms(START_POSITION, 1800, 12000, clock_left_ms=300_000, reserve_ms=45_000,
+                          increment_ms=3000) == 1800

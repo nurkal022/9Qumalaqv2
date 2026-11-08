@@ -37,7 +37,8 @@ ENDGAME_STONES = 40
 
 
 def move_budget_ms(pos: str, base_ms: int, endgame_ms: int, *, threshold: int = ENDGAME_STONES,
-                   clock_left_ms: int | None = None, reserve_ms: int = 120_000) -> int:
+                   clock_left_ms: int | None = None, reserve_ms: int = 120_000,
+                   increment_ms: int = 0) -> int:
     """Thinking budget for `pos`: `endgame_ms` once <= `threshold` stones remain on the
     board, else `base_ms`. When the remaining clock is known, never spend more than what
     keeps `reserve_ms` on the clock, falling back to half the clock once even that is
@@ -48,6 +49,15 @@ def move_budget_ms(pos: str, base_ms: int, endgame_ms: int, *, threshold: int = 
     the engine subprocess is always handed a positive value it can parse."""
     white, black, _, _, _ = _parse_pos(pos)
     budget = endgame_ms if sum(white) + sum(black) <= threshold else base_ms
+    if clock_left_ms is not None and increment_ms > 0:
+        # Fischer clock: spend at most 1/6 of what is above the reserve plus most of the
+        # increment, never more than half the clock. Below the reserve this settles at
+        # ~0.8 x increment per move, which the increment itself pays back.
+        usable = clock_left_ms - reserve_ms
+        cap = (usable // 6 if usable > 0 else 0) + increment_ms * 4 // 5
+        cap = min(cap, clock_left_ms // 2)
+        budget = min(budget, cap)
+        return max(budget, min(100, clock_left_ms), 1)
     if clock_left_ms is not None:
         cap = max(clock_left_ms - reserve_ms, min(base_ms, clock_left_ms // 2))
         budget = min(budget, cap, clock_left_ms)

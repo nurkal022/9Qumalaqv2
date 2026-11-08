@@ -33,6 +33,20 @@ from playok import PlayokClient
 GAMES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "games")
 
 
+def parse_tc(label: str):
+    """PlayOK table label -> (minutes, increment_s, rated) or None.
+    '7м+2с' -> (7, 2, True); '5м' -> (5, 0, True); '5м+3с, x' -> (5, 3, False): the ', x'
+    suffix marks a non-rated table (seen on our own tables after gtype=0)."""
+    import re as _re
+    if not label:
+        return None
+    m = _re.match(r"\s*(\d+)\s*[мm]\s*(?:\+\s*(\d+)\s*[сs])?", label)
+    if not m:
+        return None
+    rated = "x" not in [t.strip() for t in label.split(",")[1:]]
+    return int(m.group(1)), int(m.group(2) or 0), rated
+
+
 def legal_mask_from_state(i: list):
     """op-90 carries [..., 5, <mask>, ...] when it's our turn. Return mask or None."""
     for k in range(2, len(i) - 1):
@@ -75,7 +89,8 @@ class Bridge:
                  rematch=False, max_games=0,
                  # random-opponent mode
                  random_mode=False, scout_mode=False, rematch_wait_s=20,
-                 min_elo=0, blocked_nicks=None):
+                 min_elo=0, blocked_nicks=None,
+                 hybrid=False, scout_after_s=45, allow_rated=False, tc_min=2, tc_max=15):
         self.room = room
         self.created = False
         self.accept = accept
@@ -113,6 +128,7 @@ class Bridge:
         # the user told us explicitly what the host's clock is.
         self.time_min_explicit = time_min_explicit
         self.increment_s = increment_s
+        self._host_clock = (time_min, time_min_explicit, increment_s, rated)
         # rematch
         self.rematch = rematch
         self.max_games = max_games
@@ -128,6 +144,15 @@ class Bridge:
         self.blocked_nicks = {n.lower() for n in (blocked_nicks or [])}
         self.opponent_nick = None         # current opponent
         self._ratings = {}                # nick -> latest lobby rating (op 27 / op 25)
+        self._table_tc = {}               # table -> time-control label ("5м+3с, x" = unrated)
+        # hybrid mode: host our own table, but after scout_after_s with nobody seated join
+        # the strongest waiting player whose table passes the filters
+        self.hybrid = hybrid
+        self.scout_after_s = scout_after_s
+        self.allow_rated = allow_rated
+        self.tc_min, self.tc_max = tc_min, tc_max
+        self._hosted_since = None
+        self.my_moves = 0                 # our moves this game (Fischer increment credit)
         self.opponents_history: list = [] # [(nick, result_str), ...]
         self._losses_vs: dict = {}        # nick -> consecutive loss count
         self._rematch_timer = None
@@ -152,6 +177,8 @@ class Bridge:
         print(f"[bridge] recording -> {self.rec_path}", flush=True)
         self.client.on_frame = self.on_frame
         self.client.connect()
+        if self.hybrid:
+            threading.Thread(target=self._hybrid_loop, daemon=True).start()
 
     # ----------------------------------------------------------------
     def on_frame(self, i: list, s: list):
@@ -202,6 +229,7 @@ class Bridge:
         # track all tables via op-70/73 broadcasts (builds lobby map for scout mode)
         if op in (70, 73) and len(i) > 1 and len(s) >= 3:
             self._tables[i[1]] = (s[1], s[2])
+            self._table_tc[i[1]] = s[0]
             if self.scout_mode and not self.sat and not self.game.active and self.join_k is None:
                 self._try_join_from_lobby()
 
@@ -216,6 +244,7 @@ class Bridge:
                     p0 = s[j * 3 + 1] if j * 3 + 1 < len(s) else ""
                     p1 = s[j * 3 + 2] if j * 3 + 2 < len(s) else ""
                     self._tables[k] = (p0, p1)
+                    self._table_tc[k] = s[j * 3] if j * 3 < len(s) else ""
                 idx += 4
                 j += 1
             if self.scout_mode and not self.sat and not self.game.active and self.join_k is None:
@@ -315,6 +344,7 @@ class Bridge:
                     self.game.active = False
                     self.games_played += 1
                     self.spent_ms = 0
+                    self.my_moves = 0
                     # The PlayOK result field (i[4]) sign is NOT a reliable
                     # white/black-wins flag — empirically i[4]==1 occurs for BOTH
                     # white and black wins. The trustworthy signal is our own
@@ -538,27 +568,76 @@ class Bridge:
     # ----------------------------------------------------------------
     # Random-mode helpers
     # ----------------------------------------------------------------
-    def _try_join_from_lobby(self):
-        """Scout mode: find a table with exactly one empty seat and enter it."""
+    def _pick_table(self):
+        """Best joinable table: exactly one seated player (not us, not blocked), rating
+        known and >= --min-elo, a parsable clock within [tc_min, tc_max] minutes, and
+        non-rated unless --allow-rated. Strongest occupant first."""
         me = self.client.nick
+        best = None
         for k, (p0, p1) in list(self._tables.items()):
-            if bool(p0) == bool(p1):
-                continue      # either both seated or both empty
+            if bool(p0) == bool(p1) or k == self.table_k:
+                continue
             occ = p0 if p0 else p1
-            if occ == me:
-                continue      # that's our own lonely table
-            if occ.lower() in self.blocked_nicks:
+            if occ == me or occ.lower() in self.blocked_nicks:
                 continue
             r = self._ratings.get(occ)
-            if self.min_elo and (r is None or r < self.min_elo):
-                continue      # unknown or below the --min-elo filter
-            print(f"[random] scout: table #{k}  seats=({p0!r},{p1!r}) → enter", flush=True)
-            self.join_k = k
-            self.table_k = k
-            self.client.send([72, k])
-            self.entered = True
+            if r is None or (self.min_elo and r < self.min_elo):
+                continue
+            tc = parse_tc(self._table_tc.get(k, ""))
+            if tc is None or not (self.tc_min <= tc[0] <= self.tc_max):
+                continue
+            if tc[2] and not self.allow_rated:
+                continue
+            if best is None or r > best[2]:
+                best = (k, occ, r, tc)
+        return best
+
+    def _enter_table(self, k, occ, r, tc):
+        """Enter someone else's table and adopt its clock for time management."""
+        self.time_min, self.increment_s, self.rated = tc[0], tc[1], tc[2]
+        self.time_min_explicit = True
+        print(f"[random] join: table #{k} {occ} [{r}] {self._table_tc.get(k, '')!r} → enter", flush=True)
+        self.join_k = k
+        self.table_k = k
+        self.client.send([72, k])
+        self.entered = True
+
+    def _try_join_from_lobby(self):
+        """Scout mode: enter the best table that passes the filters."""
+        best = self._pick_table()
+        if best:
+            self._enter_table(*best)
             return
         print(f"[random] scout: no joinable table ({len(self._tables)} known)", flush=True)
+
+    def _hybrid_loop(self):
+        """Hybrid mode: while our own table waits with nobody seated, look every 10 s for
+        a stronger option elsewhere and switch to it after scout_after_s seconds."""
+        while not self._stop_event.is_set():
+            time.sleep(10)
+            try:
+                if (self.join_k is None and self.sat and not self.game.active
+                        and not self._table_had_opponent and self._hosted_since
+                        and time.time() - self._hosted_since >= self.scout_after_s):
+                    best = self._pick_table()
+                    if best:
+                        old = self.table_k
+                        print(f"[hybrid] nobody at our #{old} for {int(time.time() - self._hosted_since)} s"
+                              f" → switching", flush=True)
+                        if old:
+                            self.client.send([73, old])
+                        self.sat = self.started = self.invited = self.created = False
+                        self.side_locked = False
+                        self.game.reset()
+                        self.game.last_sent_pos = None
+                        self.opponent_nick = None
+                        self.spent_ms = 0
+                        self.my_moves = 0
+                        self._hosted_since = None
+                        self.entered = False
+                        self._enter_table(*best)
+            except Exception as exc:
+                print(f"[hybrid] tick error: {exc}", flush=True)
 
     def _save_summary(self):
         """Save session stats to a JSON summary file and print a report."""
@@ -611,11 +690,13 @@ class Bridge:
         self.opponent_nick = None
         self.thinking = False
         self.spent_ms = 0  # fresh clock accounting for the next game
+        self.my_moves = 0
         self._table_had_opponent = False  # reset so new table won't false-trigger
         if self.scout_mode:
             # next op-70/73 lobby update will trigger _try_join_from_lobby()
             print("[random] scout mode: waiting for lobby update (op-70/73)...", flush=True)
         else:
+            (self.time_min, self.time_min_explicit, self.increment_s, self.rated) = self._host_clock
             print("[random] host mode: creating new public table...", flush=True)
             time.sleep(1.5)
             self.client.new_table()
@@ -632,9 +713,13 @@ class Bridge:
             # fall back to the plain per-move budget (no endgame escalation, no cap).
             clock_known = self.time_min_explicit or self.join_k is None
             if clock_known:
-                clock_left = None if self.time_min == 0 else self.time_min * 60_000 - self.spent_ms
+                clock_left = (None if self.time_min == 0 else
+                              self.time_min * 60_000 + self.my_moves * self.increment_s * 1000
+                              - self.spent_ms)
+                reserve = min(120_000, max(15_000, int(self.time_min * 60_000 * 0.15)))
                 budget = move_budget_ms(pos, self.move_time_ms, self.endgame_move_time_ms,
-                                        clock_left_ms=clock_left)
+                                        clock_left_ms=clock_left, reserve_ms=reserve,
+                                        increment_ms=self.increment_s * 1000)
             else:
                 budget = move_budget_ms(pos, self.move_time_ms, self.move_time_ms,
                                         clock_left_ms=None)
@@ -671,6 +756,7 @@ class Bridge:
             # clock deducts. Treat spent_ms as a lower bound on time used, not an exact
             # mirror of the server's clock.
             self.spent_ms += int((time.monotonic() - start) * 1000)
+            self.my_moves += 1
             self.thinking = False
 
     def _abandon_table(self):
@@ -686,6 +772,7 @@ class Bridge:
         self.sat = False
         self.side_locked = False
         self.spent_ms = 0  # fresh clock accounting for the next game
+        self.my_moves = 0
         self._try_join_from_lobby()
 
     def _join_logic(self, op, i, s):
@@ -744,6 +831,7 @@ class Bridge:
 
     def _setup_table(self):
         self.sat = True
+        self._hosted_since = time.time()
         k = self.table_k
         # apply table settings
         self.client.set_table_type(k, closed=self.private)
@@ -810,6 +898,14 @@ if __name__ == "__main__":
                     help="minimum opponent ELO for scout mode (default: 0 = no filter)")
     ap.add_argument("--block", nargs="*", default=[],
                     help="nicks to never play against (e.g. --block edelveis uide)")
+    ap.add_argument("--hybrid", action="store_true",
+                    help="host our own public table, but join the strongest waiting player "
+                         "(filters below) when nobody sits down within --scout-after seconds")
+    ap.add_argument("--scout-after", type=int, default=45)
+    ap.add_argument("--allow-rated", action="store_true",
+                    help="scout/hybrid may join RATED tables (default: non-rated only)")
+    ap.add_argument("--tc-min", type=int, default=2, help="join only clocks >= this many minutes")
+    ap.add_argument("--tc-max", type=int, default=15, help="join only clocks <= this many minutes")
     args = ap.parse_args()
     if not args.user or not args.pw:
         raise SystemExit("set --user/--pw or PLAYOK_USER/PLAYOK_PW")
@@ -826,9 +922,11 @@ if __name__ == "__main__":
                time_min=effective_time_min, time_min_explicit=time_min_explicit,
                increment_s=args.increment,
                rematch=args.rematch, max_games=args.max_games,
-               random_mode=args.random or args.scout, scout_mode=args.scout,
+               random_mode=args.random or args.scout or args.hybrid, scout_mode=args.scout,
                rematch_wait_s=args.random_wait, min_elo=args.min_elo,
-               blocked_nicks=args.block)
+               blocked_nicks=args.block,
+               hybrid=args.hybrid, scout_after_s=args.scout_after, allow_rated=args.allow_rated,
+               tc_min=args.tc_min, tc_max=args.tc_max)
     b.start()
     if args.random or args.scout:
         mode = "SCOUT (join lobby)" if args.scout else "HOST (create public table)"
