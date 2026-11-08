@@ -22,6 +22,7 @@ Intended for consensual private games only.
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 import time
@@ -138,14 +139,26 @@ class PlayokClient:
         if self.verbose and i and i[0] not in (2,):
             self._log(f"  >> SEND {frame}")
 
+    def _session_lost(self, why: str) -> None:
+        # The server ended this session (op -1, e.g. 'login-1' = the account logged in
+        # elsewhere) or stopped answering. The process used to keep running with a dead
+        # session; exit instead so the supervisor (run_bot.sh) logs in again.
+        self._log(f"[playok] session lost: {why} -> exiting for supervisor restart")
+        os._exit(3)
+
     def _read_loop(self) -> None:
+        bad_since = None
         while self.running:
             try:
                 r = self.s.post(f"{BASE}/r/{self.g}", data="", headers=self._hdrs(),
                                 timeout=45)
                 if r.status_code != 200:
+                    bad_since = bad_since or time.time()
+                    if time.time() - bad_since > 90:
+                        self._session_lost(f"HTTP {r.status_code} for 90 s")
                     time.sleep(0.2)
                     continue
+                bad_since = None
                 for line in r.text.split("\n"):
                     line = line.strip()
                     if not line:
@@ -159,6 +172,8 @@ class PlayokClient:
                     if i and i[0] == 1:        # ping
                         self.send([OP_PING_REPLY])
                         continue
+                    if i and i[0] == -1:       # server closed the session
+                        self._session_lost(f"op -1 {s}")
                     name = INCOMING_NAMES.get(i[0] if i else -1, "")
                     self._log(f"  << RECV i={i} s={s}  {('('+name+')') if name else ''}")
                     if self.on_frame:
