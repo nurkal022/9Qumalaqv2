@@ -127,6 +127,7 @@ class Bridge:
         self.min_elo = min_elo            # skip opponents below this rating
         self.blocked_nicks = {n.lower() for n in (blocked_nicks or [])}
         self.opponent_nick = None         # current opponent
+        self._ratings = {}                # nick -> latest lobby rating (op 27 / op 25)
         self.opponents_history: list = [] # [(nick, result_str), ...]
         self._losses_vs: dict = {}        # nick -> consecutive loss count
         self._rematch_timer = None
@@ -157,6 +158,16 @@ class Bridge:
         if not i:
             return
         op = i[0]
+
+        # Ratings. op 27 = lobby snapshot: i=[27, ?, ?, (flags, table, rating) x N], s=[nick x N];
+        # op 25 = one player update: i=[25, flags, table, rating], s=[nick].
+        if op == 27 and s:
+            trip = i[3:]
+            for j, nick in enumerate(s):
+                if 3 * j + 2 < len(trip) and isinstance(trip[3 * j + 2], int):
+                    self._ratings[nick] = trip[3 * j + 2]
+        elif op == 25 and len(i) >= 4 and s and isinstance(i[3], int):
+            self._ratings[s[0]] = i[3]
 
         # op-84 = server tells us we entered table K; only trust if it's our nick.
         # In scout/join mode join_k is set explicitly in _try_join_from_lobby / accept handler.
@@ -425,12 +436,26 @@ class Bridge:
         outcome = getattr(self, '_last_outcome', "?")
         if hasattr(self, '_last_outcome'):
             self.opponents_history.append((opp, outcome))
-        self._game_records.append({
+        me = self.client.nick
+        rec = {
             "game": self.games_played,
             "opponent": opp,
-            "result": outcome,
+            "result": outcome,          # reconstructed from the board; official result: PlayOK archive
+            "opp_rating": self._ratings.get(opp),
+            "my_rating": self._ratings.get(me),
+            "rated": self.rated,
             "file": os.path.basename(getattr(self, 'rec_path', '')),
-        })
+            "ended": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+        self._game_records.append(rec)
+        try:
+            import json as _json
+            with open(os.path.join(GAMES_DIR, "games_log.jsonl"), "a", encoding="utf-8") as f:
+                f.write(_json.dumps(rec, ensure_ascii=False) + "\n")
+            with open(getattr(self, 'rec_path', ''), "a", encoding="utf-8") as f:
+                f.write(f"# result {outcome}  opp_rating={rec['opp_rating']} my_rating={rec['my_rating']}\n")
+        except Exception as exc:
+            print(f"[bridge] could not write game log: {exc}", flush=True)
 
         if self.random_mode:
             winrate = round(self.wins / self.games_played * 100) if self.games_played else 0
@@ -516,6 +541,11 @@ class Bridge:
             occ = p0 if p0 else p1
             if occ == me:
                 continue      # that's our own lonely table
+            if occ.lower() in self.blocked_nicks:
+                continue
+            r = self._ratings.get(occ)
+            if self.min_elo and (r is None or r < self.min_elo):
+                continue      # unknown or below the --min-elo filter
             print(f"[random] scout: table #{k}  seats=({p0!r},{p1!r}) → enter", flush=True)
             self.join_k = k
             self.table_k = k

@@ -50,11 +50,11 @@ def lim_str(limit):
     return f'time {limit[4:]}' if limit.startswith('time') else f'depth {limit[5:]}'
 
 
-def load_corpus(path, min_len=20):
+def load_corpus(path, min_len=20, exclude=frozenset()):
     games = []
     for line in gzip.open(path, 'rt'):
         g = json.loads(line)
-        if len(g['moves']) >= min_len:
+        if len(g['moves']) >= min_len and g['id'] not in exclude:
             games.append({'id': g['id'], 'moves': g['moves']})
     return games
 
@@ -103,10 +103,16 @@ def main():
     ap.add_argument('--k', type=int, default=12)
     ap.add_argument('--val-pct', type=int, default=5)
     ap.add_argument('--seed', type=int, default=1)
+    ap.add_argument('--exclude-split', default=None,
+                    help='split.json with val_games to keep out of the start positions (no leakage '
+                         'into a validation set built from the same games)')
     a = ap.parse_args()
 
     spec = json.load(open(a.engine_spec))
-    games = load_corpus(a.corpus)
+    exclude = frozenset()
+    if a.exclude_split:
+        exclude = frozenset(json.load(open(a.exclude_split))['val_games'])
+    games = load_corpus(a.corpus, exclude=exclude)
     os.makedirs(a.out, exist_ok=True)
     fh = {w: open(os.path.join(a.out, f'{w}.bin'), 'ab') for w in ('train', 'val')}
     gl = open(os.path.join(a.out, 'games.jsonl'), 'a')
@@ -115,7 +121,7 @@ def main():
     todo = [a.games]
     t0 = time.time()
     lim = lim_str(a.limit)
-    print(f'corpus {len(games)} games, engine {spec["bin"]} ({spec["res"]}), limit {a.limit}', flush=True)
+    print(f'excluded {len(exclude)} val games; corpus {len(games)} games, engine {spec["bin"]} ({spec["res"]}), limit {a.limit}', flush=True)
 
     def worker(wid):
         rnd = random.Random(a.seed * 1000 + wid)
