@@ -48,6 +48,87 @@ const RFP_MARGIN: i32 = 70;
 /// lmp_table[depth] = max quiet moves before pruning
 const LMP_TABLE: [usize; 7] = [0, 5, 8, 12, 16, 20, 24];
 
+/// Scores beyond this are "mate in N" (forced win/loss), ply-relative.
+/// Terminal and EGTB scores are EVAL_MATE - ply - dtm, so this bound leaves room for
+/// any reachable ply + dtm.
+const MATE_BOUND: i32 = EVAL_MATE - 1000;
+
+/// Mate scores are stored in the TT relative to the node, not the root, so a
+/// transposition reached at a different ply reports the right distance (ported from
+/// ae55b72, which never reached the restructured tree).
+#[inline]
+fn score_to_tt(score: i32, ply: i32) -> i32 {
+    if score > MATE_BOUND { score + ply } else if score < -MATE_BOUND { score - ply } else { score }
+}
+
+#[inline]
+fn score_from_tt(score: i32, ply: i32) -> i32 {
+    if score > MATE_BOUND { score - ply } else if score < -MATE_BOUND { score + ply } else { score }
+}
+
+/// EG_SYM=1: apply the starvation / finishing / kazan-proximity terms to both sides
+/// (eval(pos, me) == -eval(pos, opp)). Off by default until measured.
+fn eg_sym_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("EG_SYM").map(|s| s == "1").unwrap_or(false))
+}
+
+/// EG_TEMPO=1 re-enables the 2026-09-12 tempo/locked-hoard correction. It measured
+/// -116 Elo in-lineage and -22 pp externally, so it is off by default.
+fn eg_tempo_on() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("EG_TEMPO").map(|s| s == "1").unwrap_or(false))
+}
+
+/// NMP_MIN_STONES=n: only try null-move pruning above n board stones (diagnostic from
+/// the 2026-09-27 session). Default 0 = original behaviour.
+fn nmp_min_stones() -> i32 {
+    static V: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("NMP_MIN_STONES").ok().and_then(|s| s.parse().ok()).unwrap_or(0))
+}
+
+/// Starvation / finishing / kazan-proximity bonus for side `me`, whose opponent has
+/// `opp_stones` on the board.
+#[inline]
+fn endgame_side_terms(board: &Board, me: usize, opp_stones: u16, scale: i32) -> i32 {
+    let opp = 1 - me;
+    let starvation = if opp_stones <= 20 {
+        let pressure = 21 - opp_stones as i32;
+        (pressure * pressure * scale) / 8
+    } else { 0 };
+    let my_kazan = board.kazan[me] as i32;
+    let opp_kazan = board.kazan[opp] as i32;
+    let finish_bonus = if my_kazan > opp_kazan + 5 && opp_stones <= 8 {
+        (9 - opp_stones as i32) * 8 * scale
+    } else { 0 };
+    let kazan_bonus = if my_kazan >= 65 { (my_kazan - 65) * 2 * scale } else { 0 };
+    starvation + finish_bonus + kazan_bonus
+}
+
+/// Where the last stone of a move from `pit` lands, if it lands on a regular
+/// (non-tuzdyk) opponent pit: (opponent pit, stones in it after the move). Exact: a
+/// move of 19+ stones laps the board and drops more than one stone into the target;
+/// tuzdyk pits still take a stone each, so they do not shift the landing point.
+#[inline]
+pub(crate) fn last_stone_target(board: &Board, pit: usize) -> Option<(usize, u8)> {
+    let me = board.side_to_move.index();
+    let opp = 1 - me;
+    let stones = board.pits[me][pit] as usize;
+    if stones == 0 {
+        return None;
+    }
+    let (offset, laps) = if stones == 1 { (1, 1) } else { (stones - 1, (stones - 1) / 18 + 1) };
+    let pos = (pit + offset) % 18;
+    if pos < 9 {
+        return None; // landed on own side
+    }
+    let q = pos - 9;
+    if board.tuzdyk[me] == q as i8 {
+        return None; // our tuzdyk: the stone goes to our kazan, no capture
+    }
+    Some((q, board.pits[opp][q].saturating_add(laps as u8)))
+}
+
 pub struct SearchResult {
     pub best_move: usize,
     pub score: i32,
@@ -111,6 +192,13 @@ pub(crate) fn nnue_endgame_terms(board: &Board) -> i32 {
 
     // Mobility: critical endgame factor (PlayOK: mobility weight = 124 in HCE)
     let mobility_bonus = (my_active - opp_active) * 3 * scale;
+
+    if eg_sym_on() {
+        // Both sides get the same terms, so negamax sees the opponent's identical
+        // chances instead of only its own (one-sided bonus = asymmetric eval).
+        return mobility_bonus + endgame_side_terms(board, me, opp_stones, scale)
+            - endgame_side_terms(board, opp, my_stones, scale);
+    }
 
     // Starvation: quadratic pressure when opponent running low
     let starvation = if opp_stones <= 20 {
@@ -230,7 +318,8 @@ impl Searcher {
             let total = my_stones + opp_stones;
 
             if total <= 60 {
-                base + nnue_endgame_terms(board) + crate::eval::endgame_tempo_correction(board)
+                base + nnue_endgame_terms(board)
+                    + if eg_tempo_on() { crate::eval::endgame_tempo_correction(board) } else { 0 }
             } else {
                 base
             }
@@ -249,42 +338,10 @@ impl Searcher {
             return false;
         }
 
-        let (landing_side, landing_pit) = self.predict_landing(board, pit);
         let opp = board.side_to_move.opposite().index();
-
-        if landing_side == opp && landing_pit < 8 {
-            let target = board.pits[opp][landing_pit] + 1;
-            if target == 3 && board.tuzdyk[opp] != landing_pit as i8 {
-                return true;
-            }
-        }
-
-        false
-    }
-
-    /// Predict where last stone lands (side, pit)
-    #[inline]
-    fn predict_landing(&self, board: &Board, pit: usize) -> (usize, usize) {
-        let me = board.side_to_move.index();
-        let opp = board.side_to_move.opposite().index();
-        let stones = board.pits[me][pit];
-
-        if stones == 1 {
-            let next = pit + 1;
-            if next > 8 {
-                (opp, 0)
-            } else {
-                (me, next)
-            }
-        } else {
-            let remaining = stones as usize - 1;
-            let mut pos = pit + remaining;
-            let mut side = me;
-            while pos > 8 {
-                pos -= 9;
-                side = 1 - side;
-            }
-            (side, pos)
+        match last_stone_target(board, pit) {
+            Some((q, count)) => count == 3 && q < 8 && board.tuzdyk[opp] != q as i8,
+            None => false,
         }
     }
 
@@ -669,25 +726,25 @@ impl Searcher {
 
         if let Some(entry) = self.tt.probe(hash) {
             tt_move = entry.best_move;
-            tt_score = entry.score;
+            tt_score = score_from_tt(entry.score, ply);
             tt_depth = entry.depth;
             tt_is_lower = matches!(entry.flag, TTFlag::LowerBound | TTFlag::Exact);
             // During a singular-verification search the TT entry reflects the
             // excluded move, so its cutoff would be unsound — skip it.
             if entry.depth >= depth && !is_pv && excluded < 0 {
                 match entry.flag {
-                    TTFlag::Exact => return entry.score,
+                    TTFlag::Exact => return tt_score,
                     TTFlag::LowerBound => {
-                        if entry.score >= beta {
-                            return entry.score;
+                        if tt_score >= beta {
+                            return tt_score;
                         }
-                        if entry.score > alpha {
-                            alpha = entry.score;
+                        if tt_score > alpha {
+                            alpha = tt_score;
                         }
                     }
                     TTFlag::UpperBound => {
-                        if entry.score <= alpha {
-                            return entry.score;
+                        if tt_score <= alpha {
+                            return tt_score;
                         }
                     }
                 }
@@ -743,7 +800,8 @@ impl Searcher {
             .map(|&x| x as u16)
             .sum();
 
-        if depth >= 3 && my_stones > 10 && !is_endgame && ply > 0 && !is_pv {
+        if depth >= 3 && my_stones > 10 && !is_endgame && ply > 0 && !is_pv
+            && (total_board_stones as i32) > nmp_min_stones() {
             let mut null_board = *board;
             null_board.side_to_move = null_board.side_to_move.opposite();
             null_board.move_count += 1;
@@ -992,7 +1050,7 @@ impl Searcher {
         // Store in TT (but not during a singular-verification search, whose result
         // is biased by the excluded move and would corrupt the entry).
         if excluded < 0 {
-            self.tt.store(hash, depth, best_score, flag, best_move);
+            self.tt.store(hash, depth, score_to_tt(best_score, ply), flag, best_move);
         }
 
         best_score
@@ -1048,13 +1106,14 @@ impl Searcher {
         if let Some(entry) = self.tt.probe(hash) {
             // In qsearch, depth=0 entries are always valid
             if entry.depth >= 0 {
+                let tt_score = score_from_tt(entry.score, ply);
                 match entry.flag {
-                    TTFlag::Exact => return entry.score,
+                    TTFlag::Exact => return tt_score,
                     TTFlag::LowerBound => {
-                        if entry.score >= beta { return entry.score; }
+                        if tt_score >= beta { return tt_score; }
                     }
                     TTFlag::UpperBound => {
-                        if entry.score <= alpha { return entry.score; }
+                        if tt_score <= alpha { return tt_score; }
                     }
                 }
             }
@@ -1093,10 +1152,8 @@ impl Searcher {
                 score += 50_000;
             }
             if self.is_capture_move(board, m) {
-                let (landing_side, landing_pit) = self.predict_landing(board, m);
-                let opp = board.side_to_move.opposite().index();
-                if landing_side == opp {
-                    score += 10_000 + board.pits[opp][landing_pit] as i32 * 100;
+                if let Some((_, count)) = last_stone_target(board, m) {
+                    score += 10_000 + count as i32 * 100;
                 }
             }
             score += board.pits[board.side_to_move.index()][m] as i32;
@@ -1145,7 +1202,7 @@ impl Searcher {
 
             if score >= beta {
                 // Store in TT as lower bound
-                self.tt.store(hash, 0, score, TTFlag::LowerBound, m as i8);
+                self.tt.store(hash, 0, score_to_tt(score, ply), TTFlag::LowerBound, m as i8);
                 return score;
             }
             if score > alpha {
@@ -1155,32 +1212,21 @@ impl Searcher {
 
         // Store best score in TT (fail-hard: return alpha, not best_score)
         let flag = if best_score > stand_pat { TTFlag::Exact } else { TTFlag::UpperBound };
-        self.tt.store(hash, 0, best_score, flag, -1);
+        self.tt.store(hash, 0, score_to_tt(best_score, ply), flag, -1);
 
         alpha
     }
 
-    /// Check if a move would result in a capture (approximate)
+    /// Check if a move captures (even count) or creates a tuzdyk (exact, incl. 19+ laps)
     #[inline]
     fn is_capture_move(&self, board: &Board, pit: usize) -> bool {
         let me = board.side_to_move.index();
         let opp = board.side_to_move.opposite().index();
-        let stones = board.pits[me][pit];
-
-        if stones == 0 {
-            return false;
+        match last_stone_target(board, pit) {
+            Some((_, count)) if count % 2 == 0 => true,
+            Some((q, 3)) => board.tuzdyk[me] < 0 && q < 8 && board.tuzdyk[opp] != q as i8,
+            _ => false,
         }
-
-        let (landing_side, landing_pit) = self.predict_landing(board, pit);
-
-        if landing_side == opp {
-            let target = board.pits[opp][landing_pit] + 1;
-            if target % 2 == 0 || target == 3 {
-                return true;
-            }
-        }
-
-        false
     }
 
     /// Score moves for ordering
@@ -1210,10 +1256,8 @@ impl Searcher {
 
             if self.is_capture_move(board, m) {
                 score += 10_000;
-                let (landing_side, landing_pit) = self.predict_landing(board, m);
-                let opp = board.side_to_move.opposite().index();
-                if landing_side == opp {
-                    score += board.pits[opp][landing_pit] as i32 * 100;
+                if let Some((_, count)) = last_stone_target(board, m) {
+                    score += count as i32 * 100;
                 }
             }
 
@@ -1263,6 +1307,67 @@ mod tests {
     use super::*;
     use crate::board::Side;
 
+    /// Reference for capture / tuzdyk detection: actually play the move and compare
+    /// kazan and tuzdyk before and after (stones dropped into our own tuzdyk along the
+    /// way are not a capture).
+    fn reference_tactic(board: &Board, pit: usize) -> (bool, bool) {
+        let mut b = *board;
+        let me = b.side_to_move.index();
+        let tuz_before = b.tuzdyk[me];
+        let kazan_before = b.kazan[me];
+        let stones = b.pits[me][pit] as usize;
+        let (first, n) = if stones == 1 { (1, 1) } else { (0, stones) };
+        let mut into_tuz = 0u8;
+        for k in first..first + n {
+            let pos = (pit + k) % 18;
+            if pos >= 9 && b.tuzdyk[me] == (pos - 9) as i8 {
+                into_tuz += 1;
+            }
+        }
+        b.make_move(pit);
+        let created = b.tuzdyk[me] != tuz_before;
+        let captured = !created && b.kazan[me] - kazan_before > into_tuz;
+        (captured, created)
+    }
+
+    #[test]
+    fn capture_detection_is_exact() {
+        let s = Searcher::new(1);
+        let mut rng: u64 = 0x9E3779B97F4A7C15;
+        let mut next = move || { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; rng };
+        let (mut checked, mut lapped) = (0, 0);
+        for _ in 0..300 {
+            let mut board = Board::new();
+            while !board.is_terminal() {
+                let mut moves = [0usize; NUM_PITS];
+                let n = board.valid_moves_array(&mut moves);
+                if n == 0 { break; }
+                for &m in &moves[..n] {
+                    let (cap, tuz) = reference_tactic(&board, m);
+                    assert_eq!(s.move_creates_tuzdyk(&board, m), tuz, "tuzdyk {:?} pit {}", board, m);
+                    assert_eq!(s.is_capture_move(&board, m), cap || tuz, "capture {:?} pit {}", board, m);
+                    checked += 1;
+                    if board.pits[board.side_to_move.index()][m] >= 19 { lapped += 1; }
+                }
+                board.make_move(moves[(next() % n as u64) as usize]);
+            }
+        }
+        assert!(checked > 10_000, "checked {}", checked);
+        assert!(lapped > 100, "too few 19+ stone moves exercised: {}", lapped);
+    }
+
+    #[test]
+    fn mate_scores_round_trip_through_tt() {
+        for ply in [0, 1, 7, 40] {
+            for sc in [EVAL_MATE - 3, -EVAL_MATE + 9, 150, -150, 0] {
+                assert_eq!(score_from_tt(score_to_tt(sc, ply), ply), sc);
+            }
+        }
+        // A win found 5 plies below a node at ply 10 is "mate in 5" from that node.
+        assert_eq!(score_to_tt(EVAL_MATE - 15, 10), EVAL_MATE - 5);
+        assert_eq!(score_from_tt(EVAL_MATE - 5, 2), EVAL_MATE - 7);
+    }
+
     fn searcher_with_production_net() -> Searcher {
         let mut s = Searcher::new(1);
         // cargo test runs with cwd = engine/, so the production weights are one level up.
@@ -1282,11 +1387,13 @@ mod tests {
     }
 
     #[test]
-    fn live_eval_is_base_plus_endgame_terms_plus_tempo() {
+    fn live_eval_is_base_plus_endgame_terms_tempo_off_by_default() {
+        // The tempo correction measured -116 Elo in-lineage and -22 pp externally, so it
+        // is only wired in with EG_TEMPO=1 (tests never set it).
         let s = searcher_with_production_net();
         let b = hoard_position();
         let base = s.nnue.as_ref().unwrap().evaluate(&b) / 64;
-        let expected = base + nnue_endgame_terms(&b) + crate::eval::endgame_tempo_correction(&b);
+        let expected = base + nnue_endgame_terms(&b);
         assert_eq!(s.eval(&b), expected);
         assert!(crate::eval::endgame_tempo_correction(&b) < -100, "precondition: the term is active here");
     }

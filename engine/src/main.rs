@@ -822,11 +822,25 @@ fn run_serve() {
     let tt_mb: usize = std::env::var("TT_SIZE_MB")
         .ok().and_then(|s| s.parse().ok()).unwrap_or(1024);
     let mut searcher = Searcher::new(tt_mb);
-    if let Some(nnue) = load_nnue() {
-        searcher.set_nnue(nnue);
+    // A missing or unreadable net/tablebase used to fall back silently (stderr is thrown
+    // away by every harness), so production ran for weeks without its EGTB. In serve mode
+    // that is now fatal unless ENGINE_ALLOW_MISSING_ASSETS=1.
+    let allow_missing = std::env::var("ENGINE_ALLOW_MISSING_ASSETS").map(|v| v == "1").unwrap_or(false);
+    match load_nnue() {
+        Some(nnue) => searcher.set_nnue(nnue),
+        None if !allow_missing => {
+            eprintln!("FATAL: NNUE weights missing or unreadable ({})", resolve_asset(NNUE_PATH));
+            std::process::exit(2);
+        }
+        None => {}
     }
-    if let Some(tb) = load_egtb() {
-        searcher.set_egtb(tb);
+    match load_egtb() {
+        Some(tb) => searcher.set_egtb(tb),
+        None if !allow_missing => {
+            eprintln!("FATAL: EGTB missing or unreadable ({})", resolve_asset(EGTB_PATH));
+            std::process::exit(2);
+        }
+        None => {}
     }
     if let Some(book) = load_book() {
         searcher.set_book(book);
@@ -880,9 +894,17 @@ fn run_serve() {
                 let mut time_ms: u64 = 3000;
                 let mut pos_str = "";
                 let mut nobook: bool = false;
+                let mut max_depth: i32 = 30;
                 let mut i = 1;
                 while i < parts.len() {
                     match parts[i] {
+                        "depth" => {
+                            if i + 1 < parts.len() {
+                                max_depth = parts[i + 1].parse().unwrap_or(30);
+                                time_ms = 100_000_000;
+                            }
+                            i += 2;
+                        }
                         "time" => {
                             if i + 1 < parts.len() {
                                 time_ms = parts[i + 1].parse().unwrap_or(3000);
@@ -920,7 +942,7 @@ fn run_serve() {
                             out.flush().unwrap();
                         } else {
                             searcher.skip_book = nobook;
-                            let result = searcher.search_smp(&board, 30, time_ms, num_threads);
+                            let result = searcher.search_smp(&board, max_depth, time_ms, num_threads);
                             searcher.skip_book = false;
                             let chosen_move = result.best_move;
 
