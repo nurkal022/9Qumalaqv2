@@ -11,7 +11,7 @@ import sys, os, re, subprocess, threading, time, math, random
 from pathlib import Path
 
 ROOT = Path(__file__).parent.parent
-GAME_DIR = ROOT / "archive/old-impls/alphazero-code/alphazero"
+GAME_DIR = ROOT / "research/alphazero"
 assert (GAME_DIR / "game.py").exists(), f"game.py not found at {GAME_DIR}"
 sys.path.insert(0, str(GAME_DIR))
 from game import TogyzQumalaq, GameState, Player

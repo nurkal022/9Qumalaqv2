@@ -14,7 +14,8 @@ fi
 
 cd "$DIR"
 export PLAYOK_USER="${PLAYOK_USER:-alemgamer}"
-export PLAYOK_PW="${PLAYOK_PW:-REDACTED}"
+: "${PLAYOK_PW:?set PLAYOK_PW (PlayOK password)}"
+export PLAYOK_PW
 
 echo "[start_web] http://localhost:5050"
 "$VENV/bin/python" web.py "$@"

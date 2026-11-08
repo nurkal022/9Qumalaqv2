@@ -19,7 +19,7 @@ Commands during play: a pit number 1-9, 'undo' (take back one ply), 'board', 'qu
 import sys, os, subprocess, argparse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "archive/old-impls/alphazero-code/alphazero"))
+sys.path.insert(0, os.path.join(ROOT, "research/alphazero"))
 from game import TogyzQumalaq, Player  # noqa: E402
 
 ENGINE = os.path.join(ROOT, "models/engine/baseline")
