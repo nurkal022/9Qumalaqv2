@@ -194,13 +194,12 @@ class TogyzQumalaq:
         if self.state.kazan[Player.BLACK] >= self.WIN_THRESHOLD:
             return Player.BLACK
         
-        # Game ends when either side has no stones (same rule as core/board.rs on this
-        # branch). Each side sweeps its own remaining board stones into its kazan before
-        # comparing. NOTE: the real rule is "only the side TO MOVE being empty ends the
-        # game" -- that fix lives on the endgame-rules branch, together with core/.
-        white_empty = np.all(self.state.pits[Player.WHITE] == 0)
-        black_empty = np.all(self.state.pits[Player.BLACK] == 0)
-        if white_empty or black_empty:
+        # Only the side TO MOVE having no stones ends the game (verified 2026-09-12 on
+        # PlayOK and 9qum). A player who empties itself has not ended the game: the
+        # opponent must move and may be forced to feed stones back. At the terminal each
+        # side sweeps its own remaining board stones into its kazan before comparing.
+        stm = self.state.current_player
+        if np.all(self.state.pits[stm] == 0):
             kw = int(self.state.kazan[Player.WHITE]) + int(self.state.pits[Player.WHITE].sum())
             kb = int(self.state.kazan[Player.BLACK]) + int(self.state.pits[Player.BLACK].sum())
             if kw > kb:
