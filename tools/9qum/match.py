@@ -35,6 +35,7 @@ sys.path.insert(0, str(REPO / "tools"))
 from engine_provenance import compute_engine_meta  # noqa: E402  (shared with ab_match.py)
 
 BASE = "https://9qum.com/api"
+FALLBACK = None  # real-rules engine used when ours wrongly reports a terminal position
 UA = "9qumalaq-research/1.0 (friendly engine research; contact via 9qum founder)"
 
 # Their analysis boards expire (idle timeout or server-side eviction) well within the
@@ -210,6 +211,7 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
     gid = None
     st = None
     plies = 0
+    fallback_moves = 0
     void_reason = None
 
     def recreate_board():
@@ -245,8 +247,17 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
                 pos = pos_from_state(st)
                 budget = move_budget_ms(pos, move_ms, move_ms if endgame_ms is None else endgame_ms)
                 mv = eng.bestmove(pos, time_ms=budget)
-                if isinstance(mv, tuple):       # engine says terminal
-                    break
+                if isinstance(mv, tuple):
+                    # Our engine calls it terminal (old either-side-empty rule) but the
+                    # server says the game goes on. Breaking here used to be scored as a
+                    # LOSS (16 fake losses in the August gates). Ask a real-rules engine.
+                    mv = FALLBACK.bestmove(pos, time_ms=budget) if FALLBACK else None
+                    if isinstance(mv, tuple) or mv is None:
+                        legal = Engine.legal_moves(pos)
+                        mv = legal[0] if legal else None
+                    fallback_moves += 1
+                    if mv is None:
+                        break
             else:
                 # ai/think works on analysis boards too, is unmetered and returns the full
                 # visit distribution; analysis/hint is the paid product and 429s quickly.
@@ -289,6 +300,7 @@ def play_game(api, eng, our_seat, level, move_ms, pick, their_sims, log_path, id
            "move_ms": move_ms, "endgame_ms": endgame_ms, "result": result, "winner": winner, "plies": plies,
            "kazan": st.get("kazan"), "tuzdyk": st.get("tuzdyk"), "record": st.get("record"),
            "tfen": st.get("tfen"), "net_version": st.get("net_version"), "recoveries": recoveries,
+           "fallback_moves": fallback_moves,
            "engine_path": engine_meta.get("engine_path"),
            "engine_weights_path": engine_meta.get("engine_weights_path"),
            "engine_weights_size": engine_meta.get("engine_weights_size"),
@@ -341,6 +353,8 @@ def main():
                     help="thinking time at <=40 board stones (default: same as --move-ms)")
     ap.add_argument("--engine", default=str(REPO / "models" / "engine" / "baseline"))
     ap.add_argument("--parallel", type=int, default=1)
+    ap.add_argument("--fallback-engine", default=None,
+                    help="real-rules engine asked for a move when ours wrongly says 'terminal'")
     ap.add_argument("--rps", type=float, default=0.7, help="requests/s to their API (they 429 above ~1/2s)")
     ap.add_argument("--mode", default="analysis", choices=["analysis", "ai-game"],
                     help="analysis = their net at argmax(visits); ai-game = their handicapped product level")
@@ -352,6 +366,10 @@ def main():
                     help="skip the first N lines of the suite (lets a second run use fresh openings)")
     ap.add_argument("--openings", default="data/9qum/openings.jsonl")
     a = ap.parse_args()
+    global FALLBACK
+    if a.fallback_engine:
+        FALLBACK = Engine(Path(a.fallback_engine))
+        FALLBACK.start()
 
     with open("data/9qum/session.json", encoding="utf-8") as f:
         token = json.load(f)["token"]

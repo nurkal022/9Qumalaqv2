@@ -61,13 +61,21 @@ impl EvalContext {
     /// Policy head is primary signal. Value used only to reject clearly bad moves.
     /// Deep MCTS (PUCT tree search) — uses num_sims simulations
     pub fn best_move_deep(&self, board: &Board, num_sims: u32) -> usize {
+        self.best_move_deep_vb(board, num_sims, 64)
+    }
+
+    /// Full PUCT search with an explicit virtual batch (leaves collected per GPU call).
+    /// The historical default min(sims, 64) collects 64 leaves from one root before any
+    /// of them is backed up, so at 200 sims the tree is ~3 sequential steps deep and the
+    /// search mostly reproduces the policy. vb=1 is the textbook sequential search.
+    pub fn best_move_deep_vb(&self, board: &Board, num_sims: u32, vb: usize) -> usize {
         let config = mcts::MctsConfig {
             num_simulations: num_sims,
             c_puct: 2.5,
             dirichlet_alpha: 0.0,
             dirichlet_epsilon: 0.0,
             temperature_threshold: 0,
-            virtual_batch: std::cmp::min(num_sims as usize, 64),
+            virtual_batch: std::cmp::max(1, std::cmp::min(num_sims as usize, vb)),
         };
         let mcts_ctx = mcts::EvalContext::new(self.eval_tx.clone());
         let (policy, _value) = mcts::search(board, &config, &mcts_ctx, false);

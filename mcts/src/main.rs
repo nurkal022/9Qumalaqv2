@@ -81,6 +81,14 @@ struct Args {
     #[arg(long)]
     serve: bool,
 
+    /// Serve mode: leaves collected per GPU call in the full search (--eval-sims > 0)
+    #[arg(long, default_value_t = 64)]
+    virtual_batch: usize,
+
+    /// Serve mode: evaluator wait for a fuller GPU batch, microseconds
+    #[arg(long, default_value_t = 5000)]
+    max_wait_us: u64,
+
     /// League mode: mixed selfplay + engine games
     #[arg(long)]
     league: bool,
@@ -228,7 +236,7 @@ fn run_serve(args: &Args) {
     let eval_config = evaluator::EvaluatorConfig {
         model_path: args.model.clone(),
         batch_size: args.batch_size,
-        max_wait_us: 5000, // longer wait for serve (low throughput)
+        max_wait_us: args.max_wait_us, // serve: low throughput, configurable
         use_gpu: !args.cpu,
     };
     let _eval_handle = thread::spawn(move || evaluator::evaluator_loop(eval_rx, eval_config));
@@ -300,9 +308,13 @@ fn run_serve(args: &Args) {
                             writeln!(out, "terminal {}", result_str).unwrap();
                             out.flush().unwrap();
                         } else {
-                            // Use Gumbel 1-ply to find best move
+                            // --eval-sims > 0: full PUCT search; otherwise policy 1-ply
                             let t0 = Instant::now();
-                            let action = ctx.best_move(&board);
+                            let action = if args.eval_sims > 0 {
+                                ctx.best_move_deep_vb(&board, args.eval_sims, args.virtual_batch)
+                            } else {
+                                ctx.best_move(&board)
+                            };
                             let elapsed_ms = t0.elapsed().as_millis() as u64;
 
                             let mut out = stdout.lock();

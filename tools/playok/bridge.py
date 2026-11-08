@@ -344,6 +344,13 @@ class Bridge:
                     self._rematch_timer = None
                 self.game.reset()
                 self.game.active = True
+                # One engine process serves the whole session and serve mode records every
+                # played position for repetition detection; without a newgame, positions
+                # from earlier games scored as repetition draws (audit 2026-09-27).
+                try:
+                    self.engine.new_game()
+                except Exception as exc:  # never let this block the game start
+                    print(f"[engine] newgame failed: {exc}", flush=True)
                 self._game_state_seen = False  # reset: wait for first active state frame
                 # i[3] tells us who moves first: 0=white, 1=black, -1=not yet known.
                 # PlayOK alternates first mover each game. The engine pos always starts
