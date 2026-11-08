@@ -172,6 +172,12 @@ class Bridge:
         # op-84 = server tells us we entered table K; only trust if it's our nick.
         # In scout/join mode join_k is set explicitly in _try_join_from_lobby / accept handler.
         if op == 84 and len(i) > 1 and (not s or s[0] == self.client.nick or not self.client.nick):
+            # Random HOST mode: the first op-84 for our nick after op 71 is the table we just
+            # created. (The op-29 '#N' broadcast this mode used to rely on no longer arrives,
+            # so the table was never configured and the bot never sat down.)
+            if self.random_mode and not self.scout_mode and self.table_k is None and not self.join_k:
+                self.table_k = i[1]
+                print(f"[random] host mode: our new table is #{self.table_k}", flush=True)
             # In random HOST mode we always create our own table — never join others.
             if not self.join_k and not (self.random_mode and not self.scout_mode):
                 k84 = i[1]
